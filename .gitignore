@@ -16,7 +16,10 @@
 # The only exception is the sample_logs/ folder which must
 # only ever contain synthetic, anonymised test data.
 # ============================================================
- 
+
+ #exception for requirments file
+!requirements.txt
+
 # Block all CSV files everywhere
 *.csv
 **/*.csv
@@ -192,3 +195,5 @@ site/
 .dmypy.json
 dmypy.json
 .pyre/
+
+
