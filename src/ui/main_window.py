@@ -29,6 +29,7 @@ from src.ui.investigation_dashboard import InvestigationDashboard
 
 from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
+from src.filter.log_filter import LogFilter, FilterValidationError
 
 
 class MainWindow(QMainWindow):
@@ -83,7 +84,7 @@ class MainWindow(QMainWindow):
         self.tab_manager = TabManager()
         sidebar_layout.addWidget(self.tab_manager)
 
-        self.timeframe_selector = TimeFrameSelector()
+        self.timeframe_selector = TimeFrameSelector(timezone="Asia/Dubai")
         sidebar_layout.addWidget(self.timeframe_selector)
 
         sidebar_layout.addStretch()
@@ -157,10 +158,20 @@ class MainWindow(QMainWindow):
 
     def _on_timezone_changed(self, timezone_label: str) -> None:
         """TODO (R3 — Section 4.7.5 NormalizeTimestamp):
-            Trigger re-normalisation of all loaded timestamps via
-            TimestampNormalizer, then refresh every LogWindowWidget's
-            timezone badge and re-render affected visualisations.
+            For a full implementation, this should also trigger
+            re-normalisation of all loaded timestamps via
+            TimestampNormalizer for sources whose ORIGINAL source timezone
+            assignment changes (not just the display timezone), then
+            re-render affected visualisations.
         """
+        label_to_iana = {
+            "Dubai (GST, UTC+4)": "Asia/Dubai",
+            "Singapore (SGT, UTC+8)": "Asia/Singapore",
+            "Perth (AWST, UTC+8)": "Australia/Perth",
+        }
+        iana_tz = label_to_iana.get(timezone_label, "Asia/Dubai")
+        self.timeframe_selector.set_timezone(iana_tz)
+
         for panel in self.log_panels.values():
             tz_short = timezone_label.split("(")[1].split(",")[1].strip(") ")
             panel.set_timezone_label(tz_short)
@@ -178,17 +189,39 @@ class MainWindow(QMainWindow):
         # the panels_area so it is visible if off-screen.
 
     def _on_filter_applied(self, config: FilterConfig) -> None:
-        """TODO (R4/R5/R6 — Section 4.7.2 ApplyFilter):
-            Replace this placeholder with a call into LogFilter.apply_filter
-            (src/filter/log_filter.py). The real implementation must:
-              1. Convert config times to UTC
-              2. For each RawLogEntry, determine in_range using
-                 normalized_timestamp (+ milliseconds if use_ms_precision)
-              3. Call panel.highlight_matched(matched_indices) per source
-              4. Call self.tab_manager.highlight_active_tabs(...)
-              5. Call self.dashboard.refresh(summary, active, inactive)
+        """Section 4.7.2 ApplyFilter (R4, R5, R6) — fully wired to the real
+        LogFilter implementation.
         """
-        pass
+        all_entries = {
+            source_label: panel.table_model.get_entries()
+            for source_label, panel in self.log_panels.items()
+        }
+
+        try:
+            matched = LogFilter.apply_filter(config, all_entries)
+        except FilterValidationError:
+            # TimeFrameSelector already validates before emitting
+            # filter_applied, so this should not normally trigger. Guarded
+            # here in case apply_filter is ever called from elsewhere.
+            return
+
+        # Step 4 — highlight matched rows in each panel.
+        for source_label, panel in self.log_panels.items():
+            matched_indices = LogFilter.get_matched_row_indices(matched.get(source_label, []))
+            panel.highlight_matched(matched_indices)
+
+        # Steps 5-6 — update tab states.
+        active_sources, inactive_sources = LogFilter.get_active_inactive_sources(matched)
+        self.tab_manager.highlight_active_tabs(active_sources, inactive_sources)
+        for source_label, entries in matched.items():
+            self.tab_manager.set_match_count(source_label, len(entries))
+
+        # Step 7 — refresh dashboard summary.
+        summary = LogFilter.build_dashboard_summary(matched)
+        self.dashboard.refresh(summary, active_sources, inactive_sources)
+
+        total_matched = sum(len(v) for v in matched.values())
+        self.dashboard.matched_card.set_value(str(total_matched))
 
     def _on_filter_cleared(self) -> None:
         for panel in self.log_panels.values():

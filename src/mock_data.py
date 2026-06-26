@@ -16,12 +16,22 @@ sources at 08:07.
 
 from datetime import datetime, timezone
 
+import pytz
+
 from src.models.data_classes import LogFile, NormalizedTimestamp, RawLogEntry
 
 
 def _ts(hour: int, minute: int, second: int, ms: int) -> NormalizedTimestamp:
-    dt = datetime(2026, 6, 1, hour, minute, second, ms * 1000, tzinfo=timezone.utc)
-    return NormalizedTimestamp(utc_datetime=dt, source_tz="Asia/Dubai", milliseconds=ms)
+    """Builds a NormalizedTimestamp from a Dubai LOCAL time, converting to
+    UTC the same way TimestampNormalizer.normalize_timestamp() does, so
+    mock data behaves identically to real parsed data when run through
+    LogFilter or ScrollSyncManager.
+    """
+    dubai = pytz.timezone("Asia/Dubai")
+    local_dt = datetime(2026, 6, 1, hour, minute, second, ms * 1000)
+    localised_dt = dubai.localize(local_dt)
+    utc_dt = localised_dt.astimezone(pytz.UTC)
+    return NormalizedTimestamp(utc_datetime=utc_dt, source_tz="Asia/Dubai", milliseconds=ms)
 
 
 def get_mock_log_files() -> list[LogFile]:

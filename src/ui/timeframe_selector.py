@@ -11,6 +11,7 @@ Per the design doc's class diagram (Section 4.6):
 
 from datetime import datetime
 
+import pytz
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton
 
@@ -92,15 +93,22 @@ class TimeFrameSelector(QWidget):
             return
 
         try:
-            start_dt = datetime.strptime(start_text, "%Y-%m-%d %H:%M:%S.%f")
-            end_dt = datetime.strptime(end_text, "%Y-%m-%d %H:%M:%S.%f")
+            start_dt_naive = datetime.strptime(start_text, "%Y-%m-%d %H:%M:%S.%f")
+            end_dt_naive = datetime.strptime(end_text, "%Y-%m-%d %H:%M:%S.%f")
         except ValueError:
             self._show_error("Invalid date/time format entered.")
             return
 
-        if start_dt >= end_dt:
+        if start_dt_naive >= end_dt_naive:
             self._show_error("Start time must be before end time.")
             return
+
+        # LogFilter.apply_filter requires UTC-aware datetimes — localise
+        # using the investigator's selected timezone, then convert to UTC,
+        # rather than passing naive datetimes through.
+        tz_obj = pytz.timezone(self.timezone)
+        start_dt = tz_obj.localize(start_dt_naive).astimezone(pytz.UTC)
+        end_dt = tz_obj.localize(end_dt_naive).astimezone(pytz.UTC)
 
         config = FilterConfig(
             start_time=start_dt,
