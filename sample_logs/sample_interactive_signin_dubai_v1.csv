@@ -1,0 +1,13 @@
+Timestamp,Username,IP Address,Status
+2026-06-01T08:01:12.443,j.smith,10.0.1.42,Success
+2026-06-01T08:03:55.112,a.rahman,10.0.1.87,Failure
+2026-06-01T08:07:33.009,j.smith,192.168.4.2,Risky
+2026-06-01T08:07:34.210,j.smith,192.168.4.2,Failure
+2026-06-01T08:07:41.881,j.smith,192.168.4.2,Failure
+2026-06-01T08:08:02.334,j.smith,192.168.4.2,Success
+2026-06-01T08:15:44.001,m.ali,10.0.2.11,Success
+2026-06-01T08:22:10.774,r.patel,10.0.1.55,Success
+2026-06-01T08:40:03.228,a.rahman,10.0.1.87,Success
+2026-06-01T09:11:22.556,k.jones,10.0.3.99,Success
+,m.broken,10.0.5.5,Success
+2026-06-01T09:20:00.000,,,Success
