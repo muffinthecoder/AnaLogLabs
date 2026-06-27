@@ -5,16 +5,17 @@ Owned by: Pooja
 """
 
 from pathlib import Path
+from src.parser.csv_parser import parse_csv, MalformedFileError
+from src.parser.xlsx_parser import parse_xlsx
+from src.parser.txt_parser import parse_txt
+from src.models.data_classes import LogFile, RawLogEntry
+from src.correlator.timeline_merger import TimelineMerger
 
 """from src.models.data_classes import LogFile, RawLogEntry
 from csv_parser import parse_csv, MalformedFileError
 from xlsx_parser import parse_xlsx
 from txt_parser import parse_txt
 """
-from src.parser.csv_parser import parse_csv, MalformedFileError
-from src.parser.xlsx_parser import parse_xlsx
-from src.parser.txt_parser import parse_txt
-from src.models.data_classes import LogFile, RawLogEntry
 
 # TimestampNormalizer is Hiba's module (src/normaliser/timestamp_normalizer.py).
 # Imported here once it exists; until then normalization is skipped and
@@ -22,8 +23,10 @@ from src.models.data_classes import LogFile, RawLogEntry
 # handles ImportError gracefully so the rest of the pipeline still runs.
 try:
     from src.normaliser.timestamp_normalizer import TimestampNormalizer, TimestampParseError
-    _NORMALIZER_AVAILABLE = False  # temporary — remove once Hiba fixes ISO 8601 support
+    _NORMALIZER_AVAILABLE = True
 except ImportError:
+    TimestampNormalizer = None
+    TimestampParseError = None
     _NORMALIZER_AVAILABLE = False
 
 REQUIRED_FIELDS = {"timestamp"}
@@ -264,4 +267,31 @@ class LogParser:
 
     @classmethod
     def parse_files(cls, file_paths: list[str]) -> list[ParsedFileResult]:
-        return [cls.parse_file(path) for path in file_paths]
+        """Parse all files, then sort every source's valid entries into
+        chronological order per Section 4.7.1 step 5.
+
+        The merged timeline is stored back into each ParsedFileResult so
+        LogWindowWidget.load_rows() receives entries already sorted by
+        utc_datetime. Results with no valid entries are left unchanged.
+        """
+        results = [cls.parse_file(path) for path in file_paths]
+
+        # ── Section 4.7.1 step 5 — unified chronological sort ───────────────
+        # Collect every valid entry across all files into one flat list,
+        # merge-sort it by utc_datetime, then split back out per source so
+        # each LogWindowWidget gets its own sorted slice.
+        all_valid: list = []
+        for result in results:
+            all_valid.extend(result.valid_entries)
+
+        if all_valid:
+            merged = TimelineMerger.merge_chronological(all_valid)
+            by_source = TimelineMerger.split_by_source(merged)
+
+            # Write the sorted slices back into their ParsedFileResult objects
+            # so the rest of the pipeline sees chronologically ordered entries.
+            for result in results:
+                if result.source_label in by_source:
+                    result.valid_entries = by_source[result.source_label]
+
+        return results
