@@ -4,6 +4,7 @@ xlsx_parser.py — parses XLSX log files using openpyxl.
 Per Section 4.7.1 step 2: 'IF format == "xlsx": Parse using openpyxl'.
 
 Owned by: Pooja
+Initial code provided by: Fatima
 Consumed by: log_parser.py
 """
 

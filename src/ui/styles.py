@@ -4,6 +4,9 @@ styles.py — central QSS stylesheet for AnaLog Labs.
 Every hex value here is taken directly from Section 6.3.2 (Color Specification)
 of the System Design document. If a color needs to change, change it here only —
 no other file should hardcode a hex value.
+
+Owned by: Fatima
+
 """
 
 # Color spec — Section 6.3.2 -------------------------------------------------

@@ -7,6 +7,9 @@ Per the design doc's class diagram (Section 4.6):
     end_inputs: dict      (same keys)
     timezone: str
     use_24hr: bool
+
+Owned by: Fatima
+
 """
 
 from datetime import datetime

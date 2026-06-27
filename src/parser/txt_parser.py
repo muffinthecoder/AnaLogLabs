@@ -4,6 +4,7 @@ txt_parser.py — parses TXT log files line by line.
 Per Section 4.7.1 step 2: 'IF format == "txt": Parse line by line'.
 
 Owned by: Pooja
+Initial code provided by: Fatima
 Consumed by: log_parser.py
 """
 

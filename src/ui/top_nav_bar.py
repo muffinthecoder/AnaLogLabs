@@ -7,6 +7,9 @@ Controls (per design doc table):
     Sync scroll        — toggle button
     Time zone          — dropdown: Perth | Singapore | Dubai
     Session status      — status indicator (logs loaded count + active dot)
+
+Owned by: Fatima
+
 """
 
 from PySide6.QtCore import Signal

@@ -4,6 +4,7 @@ csv_parser.py — parses CSV log files using csv.DictReader.
 Per Section 4.7.1 step 2: 'IF format == "csv": Parse using csv.DictReader'.
 
 Owned by: Pooja
+Initial code provided by: Fatima
 Consumed by: log_parser.py
 """
 
