@@ -13,13 +13,12 @@ inside the MainWindow's central workspace (Zone 3).
 """
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView,
-)
-
 from src.models.data_classes import RawLogEntry
 from src.models.log_table_model import LogTableModel
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
+    QHeaderView, QAbstractItemView,
+)
 
 
 class LogWindowWidget(QWidget):
@@ -82,10 +81,15 @@ class LogWindowWidget(QWidget):
         self.table_view = QTableView()
         self.table_view.setModel(self.table_model)
         self.table_view.setShowGrid(False)
-        self.table_view.setSelectionBehavior(QTableView.SelectRows)
-        self.table_view.setSelectionMode(QTableView.SingleSelection)
+        self.table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table_view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.table_view.verticalHeader().setVisible(False)
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table_view.horizontalHeader().setMinimumSectionSize(60)
+        self.table_view.setHorizontalScrollMode(QTableView.ScrollMode.ScrollPerPixel)
+        self.table_view.setWordWrap(False)
+        self.table_view.verticalHeader().setDefaultSectionSize(22)
+        self.table_view.setAlternatingRowColors(True)
         self.table_view.clicked.connect(self._on_row_clicked)
 
         # TODO (Section 4.7.3 SyncScroll):
@@ -107,7 +111,7 @@ class LogWindowWidget(QWidget):
         sync_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
         sync_layout.addWidget(sync_label)
 
-        self.scroll_indicator = QSlider(Qt.Horizontal)
+        self.scroll_indicator = QSlider(Qt.Orientation.Horizontal)
         self.scroll_indicator.setEnabled(False)  # display-only, driven programmatically
         sync_layout.addWidget(self.scroll_indicator)
 
@@ -117,12 +121,37 @@ class LogWindowWidget(QWidget):
 
         layout.addWidget(sync_bar)
 
+    def _resize_columns_to_content(self) -> None:
+        """Set sensible column widths after data loads.
+        Uses the first 200 rows as a sample rather than measuring all rows,
+        keeping it fast on large files.
+        """
+        header = self.table_view.horizontalHeader()
+        # Sample-based resize: measure only visible/first rows for speed
+        self.table_view.resizeColumnsToContents()
+
+        # Apply per-column minimum widths for known fields
+        col_min_widths = {
+            "timestamp": 160,
+            "date": 160,
+            "username": 130,
+            "ip_address": 120,
+            "status": 70,
+            "action_type": 140,
+            "hostname": 130,
+        }
+        for col_index in range(self.table_model.columnCount()):
+            col_key = self.table_model.column_key_at(col_index)
+            min_w = col_min_widths.get(col_key, 80)
+            if header.sectionSize(col_index) < min_w:
+                header.resizeSection(col_index, min_w)
     # -- Public API --------------------------------------------------------------
 
     def load_rows(self, entries: list[RawLogEntry]) -> None:
         """Load entries filtered to this source_label (Section 4.7.1 step 6)."""
         self.table_model.load_entries(entries)
         self.row_count_label.setText(f"{len(entries):,} rows")
+        self._resize_columns_to_content()
 
     def highlight_matched(self, matched_row_indices: list[int]) -> None:
         """Called by LogFilter results (Section 4.7.2 step 4)."""
@@ -130,15 +159,29 @@ class LogWindowWidget(QWidget):
         self.table_model.highlight_matched(matched_row_indices)
 
     def receive_sync_scroll(self, row_index: int) -> None:
-        """Called by ScrollSyncManager — sets scroll position WITHOUT emitting
-        the `scrolled` signal again, to avoid recursive sync loops
+        """Called by ScrollSyncManager — scrolls this panel to row_index
+        WITHOUT emitting the scrolled signal, preventing recursive sync loops
         (Section 4.7.3 step 4).
-
-        TODO (Fatima — Section 4.7.3):
-            self.table_view.scrollTo(...) using row_index, blocking signals
-            on verticalScrollBar() for the duration of the call.
         """
-        pass
+        if not self.table_model.rowCount():
+            return
+
+        # Clamp to valid range
+        row_index = max(0, min(row_index, self.table_model.rowCount() - 1))
+
+        # Block the scroll signal so ScrollSyncManager doesn't pick this up
+        # as a new user-initiated scroll and trigger another sync round.
+        scrollbar = self.table_view.verticalScrollBar()
+        scrollbar.blockSignals(True)
+        try:
+            index = self.table_model.index(row_index, 0)
+            self.table_view.scrollTo(
+                index,
+                QAbstractItemView.ScrollHint.PositionAtTop,
+            )
+            self.scroll_position = scrollbar.value()
+        finally:
+            scrollbar.blockSignals(False)
 
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)

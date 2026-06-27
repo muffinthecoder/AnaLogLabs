@@ -15,6 +15,7 @@ Organised into three main areas per Section 5.2:
 
 import sys
 
+from src.normaliser.timezone_map import set_timezone_for_source
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog
 )
@@ -31,11 +32,11 @@ from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
 from src.parser.log_parser import LogParser
+from src.correlator.scroll_sync_manager import ScrollSyncManager
 
 
 class MainWindow(QMainWindow):
     """Application shell — Section 5.2 Presentation Layer."""
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AnaLog Labs")
@@ -44,6 +45,9 @@ class MainWindow(QMainWindow):
 
         # source_label -> LogWindowWidget, mirrors ScrollSyncManager.windows
         self.log_panels: dict[str, LogWindowWidget] = {}
+
+        self._scroll_sync = ScrollSyncManager()
+        self._sync_scroll_enabled: bool = False
 
         self._build_ui()
         self._connect_signals()
@@ -139,6 +143,9 @@ class MainWindow(QMainWindow):
 
         self.top_nav.set_loaded_count(len(self.log_panels))
         self.top_nav.set_sync_scroll_enabled(len(self.log_panels) >= 2)
+        if self._sync_scroll_enabled:
+            self._scroll_sync.register_window(source_label, panel)
+
         return panel
 
     # -- Signal handlers -----------------------------------------------------------
@@ -184,16 +191,20 @@ class MainWindow(QMainWindow):
         iana_tz = label_to_iana.get(timezone_label, "Asia/Dubai")
         self.timeframe_selector.set_timezone(iana_tz)
 
+        for source_label in self.log_panels:
+            set_timezone_for_source(source_label, iana_tz)
+
         for panel in self.log_panels.values():
             tz_short = timezone_label.split("(")[1].split(",")[1].strip(") ")
             panel.set_timezone_label(tz_short)
 
     def _on_sync_scroll_toggled(self, enabled: bool) -> None:
-        """TODO (Section 4.7.3 SyncScroll):
-            Wire to ScrollSyncManager — when enabled, register all open
-            LogWindowWidgets; when disabled, unregister them.
-        """
-        pass
+        """Register or unregister all open log panels with ScrollSyncManager."""
+        self._sync_scroll_enabled = enabled
+        self._scroll_sync.clear()
+        if enabled:
+            for source_label, panel in self.log_panels.items():
+                self._scroll_sync.register_window(source_label, panel)
 
     def _on_tab_selected(self, source_label: str) -> None:
         self.tab_manager.set_focused_tab(source_label)
@@ -246,13 +257,12 @@ class MainWindow(QMainWindow):
         self.event_detail_panel.show_event(entry, correlation_count=0)
 
     def _on_panel_scrolled(self, source_label: str, scroll_position: int) -> None:
-        """TODO (Section 4.7.3 SyncScroll):
-            If sync scroll is enabled, find the anchor timestamp at
-            scroll_position in this panel, binary-search the closest row in
-            every other open panel, then call their receive_sync_scroll().
-            Must guard against recursive loops (ScrollSyncManager.is_syncing).
-        """
-        pass
+        """Forward scroll events to ScrollSyncManager when sync is active."""
+        if not self._sync_scroll_enabled:
+            return
+        source_panel = self.log_panels.get(source_label)
+        if source_panel is not None:
+            self._scroll_sync.sync_scroll(source_panel, scroll_position)
 
     def _on_correlated_event_clicked(self, timestamp: str) -> None:
         """TODO: scroll all open log panels to the given timestamp."""
