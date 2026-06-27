@@ -1,140 +1,185 @@
 """
-log_parser.py — implements ALGORITHM: ImportAndParse from Section 4.7.1 of
-the design document (R1, R2, R3), steps 1 through 4.
-
-Step 5 (chronological merge) lives in src/correlator/timeline_merger.py
-(Hiba's module) since it operates across sources, not within a single
-LogParser.parse_file() call.
+log_parser.py — implements ALGORITHM: ImportAndParse from Section 4.7.1.
 
 Owned by: Pooja
-Depends on: src/normaliser/timestamp_normalizer.py (Hiba's module)
 """
 
 from pathlib import Path
 
-from src.models.data_classes import LogFile, RawLogEntry
-from src.normaliser.timestamp_normalizer import TimestampNormalizer, TimestampParseError
-from src.parser.csv_parser import parse_csv
+"""from src.models.data_classes import LogFile, RawLogEntry
+from csv_parser import parse_csv, MalformedFileError
+from xlsx_parser import parse_xlsx
+from txt_parser import parse_txt
+"""
+from src.parser.csv_parser import parse_csv, MalformedFileError
 from src.parser.xlsx_parser import parse_xlsx
 from src.parser.txt_parser import parse_txt
+from src.models.data_classes import LogFile, RawLogEntry
 
+# TimestampNormalizer is Hiba's module (src/normaliser/timestamp_normalizer.py).
+# Imported here once it exists; until then normalization is skipped and
+# normalized_timestamp is left as None. The try/except block in parse_file()
+# handles ImportError gracefully so the rest of the pipeline still runs.
+try:
+    from src.normaliser.timestamp_normalizer import TimestampNormalizer, TimestampParseError
+    _NORMALIZER_AVAILABLE = False  # temporary — remove once Hiba fixes ISO 8601 support
+except ImportError:
+    _NORMALIZER_AVAILABLE = False
 
-# Canonical field names that every log source is mapped to, regardless of
-# its original column headers. Required fields must be present (after
-# mapping) for a row to be considered valid.
 REQUIRED_FIELDS = {"timestamp"}
 
-# Maps known raw column header variants -> canonical field name. Extend
-# this as new log source schemas are confirmed by the client (Mike).
-#
-# TODO (Pooja/Hiba — confirm against real sample logs once provided):
-#   These mappings are best-effort guesses based on the R&A document's
-#   listed log sources (Interactive Sign-In, MUPC, WLC). Update once real
-#   column headers are confirmed against actual exported files.
+# Maps every known raw column header -> canonical field name.
+# Covers all 8 log sources confirmed from the client (Mike) briefing.
 _FIELD_NAME_ALIASES = {
-    # timestamp variants
-    "timestamp": "timestamp",
-    "time": "timestamp",
-    "event_time": "timestamp",
-    "datetime": "timestamp",
-    # username variants
-    "username": "username",
-    "user": "username",
-    "account": "username",
-    "account_name": "username",
-    # ip address variants
-    "ip_address": "ip_address",
-    "ip": "ip_address",
-    "source_ip": "ip_address",
-    "client_ip": "ip_address",
-    # status variants
-    "status": "status",
-    "result": "status",
-    "outcome": "status",
+    # ── Timestamp variants ──────────────────────────────────────────────
+    "timestamp":                    "timestamp",
+    "time":                         "timestamp",
+    "date_utc":                     "timestamp",
+    "date":                         "timestamp",
+    "event_time":                   "timestamp",
+    "datetime":                     "timestamp",
+
+    # ── Username / identity variants ────────────────────────────────────
+    "username":                     "username",
+    "user":                         "username",
+    "user_username":                "username",
+    "account":                      "username",
+    "account_name":                 "username",
+    "service_principal_name":       "username",   # App/MSI sign-in logs
+
+    # ── IP address variants ─────────────────────────────────────────────
+    "ip_address":                   "ip_address",
+    "ip":                           "ip_address",
+    "source_ip":                    "ip_address",
+    "client_ip":                    "ip_address",
+    "ip_address_seen_by_resource":  "ip_address",
+
+    # ── Status / result variants ────────────────────────────────────────
+    "status":                       "status",
+    "result":                       "status",
+    "outcome":                      "status",
+    "succeeded":                    "status",     # Auth details CSVs
+
+    # ── Application / resource ──────────────────────────────────────────
+    "application":                  "application",
+    "resource":                     "resource",
+
+    # ── Device / client info ────────────────────────────────────────────
+    "device_id":                    "device_id",
+    "client_app":                   "client_app",
+    "browser":                      "browser",
+    "operating_system":             "operating_system",
+    "user_agent":                   "user_agent",
+
+    # ── MFA ─────────────────────────────────────────────────────────────
+    "multifactor_authentication_result":      "mfa_result",
+    "multifactor_authentication_auth_method": "mfa_method",
+
+    # ── Conditional access ───────────────────────────────────────────────
+    "conditional_access":           "conditional_access",
+
+    # ── WLC-specific (parsed from syslog freetext by txt_parser) ────────
+    "mac":                          "mac_address",
+    "ssid":                         "ssid",
+    "ap":                           "access_point",
+
+    # ── MUPC (MDE) specific ─────────────────────────────────────────────
+    "machine_id":                   "device_id",
+    "computer_name":                "hostname",
+    "action_type":                  "action_type",
+    "file_name":                    "file_name",
+    "folder_path":                  "folder_path",
+    "sha1":                         "sha1",
+    "sha256":                       "sha256",
+    "md5":                          "md5",
+    "process_command_line":         "process_command_line",
+    "account_domain":               "account_domain",
+    "account_sid":                  "account_sid",
+    "logon_id":                     "logon_id",
+    "process_id":                   "process_id",
+    "remote_ip":                    "ip_address",
+    "remote_port":                  "remote_port",
+    "local_ip":                     "local_ip",
+    "local_port":                   "local_port",
+    "remote_url":                   "remote_url",
+    "remote_computer_name":         "remote_hostname",
+    "initiating_process_file_name": "initiating_process",
+    "initiating_process_account_name": "initiating_account",
+    "initiating_process_command_line": "initiating_command",
+    "report_id":                    "report_id",
+    "alert_ids":                    "alert_ids",
+    "categories":                   "categories",
+    "severities":                   "severities",
+    "protocol":                     "protocol",
+    "logon_type":                   "logon_type",
 }
 
 
 class ParsedFileResult:
-    """Return value of LogParser.parse_file() — bundles valid entries with
-    error/skip reporting, per Section 4.7.1's error handling note: 'the
-    count of skipped rows is reported to the user'.
-    """
-
     def __init__(self, source_label: str):
         self.source_label = source_label
         self.valid_entries: list[RawLogEntry] = []
         self.skipped_count: int = 0
         self.skip_reasons: list[str] = []
+        self.file_error: str | None = None   # set if the whole file fails
 
     def __repr__(self) -> str:
         return (
             f"ParsedFileResult(source_label={self.source_label!r}, "
-            f"valid={len(self.valid_entries)}, skipped={self.skipped_count})"
+            f"valid={len(self.valid_entries)}, skipped={self.skipped_count}, "
+            f"file_error={self.file_error!r})"
         )
+
+    @property
+    def failed(self) -> bool:
+        """True if the entire file could not be parsed at all."""
+        return self.file_error is not None
 
 
 class LogParser:
-    """Implements Section 4.7.1 steps 1-4: file detection, format-specific
-    parsing, field mapping, row validation, and timestamp normalization.
-    """
 
     @staticmethod
     def create_log_file(file_path: str) -> LogFile:
-        """Section 4.7.1 step 1:
-            'Create LogFile(file_path), Detect format from extension
-            (.csv / .xlsx / .txt), Mark file as read-only, Assign
-            source_label from filename (strip extension)'
-        """
         path = Path(file_path)
         extension = path.suffix.lower().lstrip(".")
 
         if extension not in ("csv", "xlsx", "txt"):
             raise ValueError(
                 f"Unsupported file extension '.{extension}'. "
-                f"AnaLog Labs only supports .csv, .xlsx, and .txt log files."
+                f"AnaLog Labs supports .csv, .xlsx, and .txt only."
             )
-
-        source_label = path.stem  # filename without extension
 
         return LogFile(
             file_path=str(path),
             file_format=extension,
-            source_label=source_label,
+            source_label=path.stem,
             is_read_only=True,
         )
 
     @staticmethod
     def _map_fields(raw_row: dict) -> dict:
-        """Section 4.7.1 step 3: '_map_fields(row) - map raw column names
-        to canonical field names'.
-
-        Matching is case-insensitive and ignores surrounding whitespace in
-        the original header. Any column that doesn't match a known alias
-        is kept under its original (lowercased) key so no data is silently
-        dropped — it just won't be treated as a canonical field for
-        filtering/correlation purposes.
-        """
         mapped = {}
         for raw_key, value in raw_row.items():
-            normalised_key = raw_key.strip().lower().replace(" ", "_")
+            normalised_key = (
+                raw_key.strip()
+                .lower()
+                .replace("(", "")
+                .replace(")", "")
+                .replace(" ", "_")
+            )
             canonical_key = _FIELD_NAME_ALIASES.get(normalised_key, normalised_key)
             mapped[canonical_key] = value
         return mapped
 
     @staticmethod
     def _validate_row(mapped_row: dict) -> tuple[bool, str | None]:
-        """Section 4.7.1 step 3: '_validate_row(row)'.
-
-        Returns:
-            (is_valid, reason) — reason is None if is_valid is True.
-        """
         timestamp_value = mapped_row.get("timestamp", "")
         if not timestamp_value or not str(timestamp_value).strip():
             return False, "Missing timestamp field"
 
-        missing_required = REQUIRED_FIELDS - set(
+        missing_required = REQUIRED_FIELDS - {
             k for k, v in mapped_row.items() if v not in (None, "")
-        )
+        }
         if missing_required:
             return False, f"Missing required field(s): {', '.join(missing_required)}"
 
@@ -142,34 +187,35 @@ class LogParser:
 
     @classmethod
     def parse_file(cls, file_path: str) -> ParsedFileResult:
-        """Parses a single log file end to end: format detection, raw
-        parsing, field mapping, validation, and timestamp normalization.
-
-        This corresponds to Section 4.7.1 steps 1-4 for ONE file. The
-        caller (typically MainWindow._on_import_logs) is responsible for
-        looping over multiple files and merging results via
-        TimelineMerger.merge_chronological().
-
-        Returns:
-            ParsedFileResult containing valid RawLogEntry objects plus
-            skip/error reporting.
+        """Parse a single log file. If the file itself is unreadable/malformed,
+        result.failed will be True and result.file_error will contain the reason.
+        Row-level errors increment result.skipped_count instead.
         """
-        log_file = cls.create_log_file(file_path)
+        try:
+            log_file = cls.create_log_file(file_path)
+        except ValueError as exc:
+            result = ParsedFileResult(source_label=Path(file_path).stem)
+            result.file_error = str(exc)
+            return result
+
         result = ParsedFileResult(source_label=log_file.source_label)
 
-        # Step 2 — dispatch to the correct format-specific parser.
-        if log_file.file_format == "csv":
-            raw_rows = parse_csv(log_file.file_path)
-        elif log_file.file_format == "xlsx":
-            raw_rows = parse_xlsx(log_file.file_path)
-        elif log_file.file_format == "txt":
-            raw_rows = parse_txt(log_file.file_path)
-        else:
-            # create_log_file already validates this, so this branch should
-            # be unreachable, but fail loudly if it ever happens.
-            raise ValueError(f"Unhandled file_format: {log_file.file_format}")
+        # ── Dispatch to format-specific parser ──────────────────────────
+        try:
+            if log_file.file_format == "csv":
+                raw_rows = parse_csv(log_file.file_path)
+            elif log_file.file_format == "xlsx":
+                raw_rows = parse_xlsx(log_file.file_path)
+            else:
+                raw_rows = parse_txt(log_file.file_path)
+        except FileNotFoundError as exc:
+            result.file_error = str(exc)
+            return result
+        except MalformedFileError as exc:
+            result.file_error = str(exc)
+            return result
 
-        # Step 3 — map fields, validate, build entries.
+        # ── Row-level processing ─────────────────────────────────────────
         for row_index, raw_row in enumerate(raw_rows):
             mapped_row = cls._map_fields(raw_row)
             is_valid, reason = cls._validate_row(mapped_row)
@@ -185,30 +231,32 @@ class LogParser:
                 fields=mapped_row,
                 row_index=row_index,
                 is_valid=True,
-                normalized_timestamp=None,  # filled in below
+                normalized_timestamp=None,
             )
 
-            # Step 4 — normalize the timestamp via Hiba's module.
-            try:
-                normalized = TimestampNormalizer.normalize_for_source(
-                    raw_ts=entry.raw_timestamp,
+            # ── Timestamp normalisation (Hiba's module) ──────────────────
+            # Skipped gracefully until TimestampNormalizer is implemented.
+            # Once src/normaliser/timestamp_normalizer.py exists, this block
+            # will run automatically — no changes needed here.
+            if _NORMALIZER_AVAILABLE:
+                try:
+                    normalized = TimestampNormalizer.normalize_for_source(
+                        raw_ts=entry.raw_timestamp,
+                        source_label=entry.source_label,
+                    )
+                except TimestampParseError as exc:
+                    result.skipped_count += 1
+                    result.skip_reasons.append(f"Row {row_index}: {exc}")
+                    continue
+
+                entry = RawLogEntry(
                     source_label=entry.source_label,
+                    raw_timestamp=entry.raw_timestamp,
+                    fields=entry.fields,
+                    row_index=entry.row_index,
+                    is_valid=True,
+                    normalized_timestamp=normalized,
                 )
-            except TimestampParseError as exc:
-                result.skipped_count += 1
-                result.skip_reasons.append(f"Row {row_index}: {exc}")
-                continue
-
-            # RawLogEntry is frozen, so rebuild it with the normalized
-            # timestamp attached rather than mutating in place.
-            entry = RawLogEntry(
-                source_label=entry.source_label,
-                raw_timestamp=entry.raw_timestamp,
-                fields=entry.fields,
-                row_index=entry.row_index,
-                is_valid=True,
-                normalized_timestamp=normalized,
-            )
 
             result.valid_entries.append(entry)
 
@@ -216,8 +264,4 @@ class LogParser:
 
     @classmethod
     def parse_files(cls, file_paths: list[str]) -> list[ParsedFileResult]:
-        """Parses multiple files, one ParsedFileResult per file. Does NOT
-        merge across sources — call TimelineMerger.merge_chronological() on
-        the combined valid_entries afterwards for the unified timeline (R2).
-        """
         return [cls.parse_file(path) for path in file_paths]

@@ -30,6 +30,7 @@ from src.ui.investigation_dashboard import InvestigationDashboard
 from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
+from src.parser.log_parser import LogParser
 
 
 class MainWindow(QMainWindow):
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         #   Remove this call once LogParser (R1) is implemented and wired to
         #   the real Import logs button flow. This currently loads
         #   mock_data so the interface can be reviewed end-to-end.
-        self._load_mock_session()
+        # self._load_mock_session()
 
     # -- UI construction ------------------------------------------------------------
 
@@ -143,18 +144,29 @@ class MainWindow(QMainWindow):
     # -- Signal handlers -----------------------------------------------------------
 
     def _on_import_logs(self) -> None:
-        """TODO (R1 — Section 4.7.1 ImportAndParse):
-            Replace this QFileDialog-only stub with a call into
-            LogParser.parse(file_paths) once src/parser/ is implemented.
-            Currently does nothing with the selected files — UI only.
-        """
+        """R1 — Section 4.7.1 ImportAndParse: Wire LogParser to UI."""
         file_paths, _ = QFileDialog.getOpenFileNames(
             self, "Import log files", "", "Log files (*.csv *.xlsx *.txt)"
         )
         if not file_paths:
             return
-        # TODO: pass file_paths into LogParser, then call add_log_panel()
-        # for each resulting source, then load_rows() with parsed entries.
+
+        results = LogParser.parse_files(file_paths)
+        for result in results:
+            if result.failed:
+                # TODO: show error dialog with result.file_error
+                print(f"File error: {result.file_error}")
+                continue
+
+            if not result.valid_entries:
+                # TODO: show warning dialog — file parsed but had 0 valid rows
+                print(f"No valid entries in {result.source_label}")
+                continue
+
+            columns = list(result.valid_entries[0].fields.keys())
+            color = "#4A90D9"  # default blue
+            panel = self.add_log_panel(result.source_label, color, columns)
+            panel.load_rows(result.valid_entries)
 
     def _on_timezone_changed(self, timezone_label: str) -> None:
         """TODO (R3 — Section 4.7.5 NormalizeTimestamp):
