@@ -6,6 +6,9 @@ Tab states (Section 6.3.4):
     Active   (cyan border)  — currently focused log panel
     Match    (green border) — contains events within the investigation window
     Inactive (greyed out)   — no events within the investigation window
+
+Owned by: Fatima
+
 """
 
 from PySide6.QtCore import Signal
@@ -99,6 +102,17 @@ class TabManager(QWidget):
         tab.clicked_tab.connect(self.tab_selected.emit)
         self._tabs[source_label] = tab
         self.layout_.addWidget(tab)
+
+    def remove_tab(self, source_label: str) -> None:
+        """Removes the tab for a closed log panel.
+
+        Called from MainWindow._on_panel_closed() so a tab never points at
+        a LogWindowWidget that no longer exists.
+        """
+        tab = self._tabs.pop(source_label, None)
+        if tab is not None:
+            self.layout_.removeWidget(tab)
+            tab.deleteLater()
 
     def highlight_active_tabs(self, active_sources: list[str], inactive_sources: list[str]) -> None:
         """Section 4.7.2 step 6 — called after ApplyFilter completes.

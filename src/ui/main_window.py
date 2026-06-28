@@ -15,9 +15,11 @@ Organised into three main areas per Section 5.2:
 
 import sys
 
-from src.normaliser.timezone_map import set_timezone_for_source
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog,
+    QMdiArea, QMdiSubWindow
 )
 
 from src.ui.styles import MAIN_STYLESHEET
@@ -32,11 +34,20 @@ from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
 from src.parser.log_parser import LogParser
+from src.normaliser.timezone_map import set_timezone_for_source
 from src.correlator.scroll_sync_manager import ScrollSyncManager
+
+# TODO (Fatima — styles.py):
+#   Move this to styles.py once that file is shared/consolidated, so the
+#   QMdiArea background and the rest of the dark theme stay in one place
+#   instead of main_window.py hardcoding its own color. Match this to
+#   whatever the outer app background is in MAIN_STYLESHEET.
+BACKGROUND_COLOR = "#0a0e1a"
 
 
 class MainWindow(QMainWindow):
     """Application shell — Section 5.2 Presentation Layer."""
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AnaLog Labs")
@@ -46,6 +57,15 @@ class MainWindow(QMainWindow):
         # source_label -> LogWindowWidget, mirrors ScrollSyncManager.windows
         self.log_panels: dict[str, LogWindowWidget] = {}
 
+        # source_label -> QMdiSubWindow — the movable/resizable/closable
+        # container each LogWindowWidget lives inside. Tracked separately
+        # from self.log_panels since MainWindow needs the sub-window (not
+        # the inner widget) to control geometry, tiling, and closing.
+        self.log_subwindows: dict[str, QMdiSubWindow] = {}
+
+        # Hiba's real Section 4.7.3 SyncScroll implementation — registers
+        # LogWindowWidget instances by source_label and keeps their scroll
+        # positions aligned by UTC timestamp rather than row index.
         self._scroll_sync = ScrollSyncManager()
         self._sync_scroll_enabled: bool = False
 
@@ -101,10 +121,27 @@ class MainWindow(QMainWindow):
         centre_layout.setContentsMargins(0, 0, 0, 0)
         centre_layout.setSpacing(0)
 
-        self.panels_area = QWidget()
-        self.panels_layout = QHBoxLayout(self.panels_area)
-        self.panels_layout.setContentsMargins(0, 0, 0, 0)
-        self.panels_layout.setSpacing(0)
+        # Zone 3: log panel workspace — QMdiArea gives each LogWindowWidget
+        # an independently movable, resizable, and closable sub-window
+        # (drag the title bar to move, drag edges/corners to resize, click
+        # the X to close), which a plain QHBoxLayout cannot provide since
+        # layout-managed widgets have their geometry fixed by the layout.
+        self.panels_area = QMdiArea()
+        self.panels_area.setObjectName("PanelsArea")
+        self.panels_area.setViewMode(QMdiArea.SubWindowView)
+        self.panels_area.setOption(QMdiArea.DontMaximizeSubWindowOnActivation, True)
+        self.panels_area.setTabsClosable(False)
+
+        # QMdiArea paints its own background via QPalette.Window rather than
+        # respecting a plain stylesheet `background-color` on #PanelsArea —
+        # that's why it shows up grey by default. Setting the palette
+        # directly (in addition to the stylesheet rule in styles.py) is
+        # what actually overrides it.
+        panels_palette = self.panels_area.palette()
+        panels_palette.setColor(QPalette.Window, QColor(BACKGROUND_COLOR))
+        self.panels_area.setPalette(panels_palette)
+        self.panels_area.setBackground(QColor(BACKGROUND_COLOR))
+
         centre_layout.addWidget(self.panels_area, stretch=1)
 
         self.event_detail_panel = EventDetailPanel()
@@ -136,13 +173,52 @@ class MainWindow(QMainWindow):
         panel = LogWindowWidget(source_label=source_label, color_hex=color_hex, columns=columns)
         panel.row_selected.connect(self._on_row_selected)
         panel.scrolled.connect(self._on_panel_scrolled)
+        panel.panel_closed.connect(self._on_panel_closed)
+        panel.restore_size_requested.connect(self._on_restore_size_requested)
+
+        # Wrap in a QMdiSubWindow so the investigator can drag to move,
+        # drag edges/corners to resize, and click the native X button to
+        # close — none of which a plain layout-managed widget supports.
+        sub_window = QMdiSubWindow()
+        sub_window.setWidget(panel)
+        sub_window.setWindowTitle(source_label)
+        sub_window.setAttribute(Qt.WA_DeleteOnClose, True)
+        # LogWindowWidget.closeEvent() already emits panel_closed when the
+        # sub-window's X button is clicked, since closing a QMdiSubWindow
+        # propagates closeEvent to its inner widget first.
+
+        self.panels_area.addSubWindow(sub_window)
+        sub_window.resize(480, 420)
+        sub_window.show()
 
         self.log_panels[source_label] = panel
-        self.panels_layout.addWidget(panel)
+        self.log_subwindows[source_label] = sub_window
         self.tab_manager.add_tab(source_label, color_hex)
+
+        # Side-by-side default layout for newly-opened panels — re-tile
+        # existing windows so they reflow rather than stacking on top of
+        # each other. Investigators can still freely drag/resize afterwards;
+        # this only sets the initial arrangement.
+        #
+        # IMPORTANT: tileSubWindows() silently un-maximizes any currently
+        # maximized sub-window without updating its title-bar button state
+        # to match — this was the cause of a "maximize gets stuck" bug
+        # found during testing. Skipping the auto-tile whenever any panel
+        # is already maximized avoids triggering that mismatch.
+        any_maximized = any(
+            sw.windowState() & Qt.WindowMaximized
+            for sw in self.log_subwindows.values()
+        )
+        if not any_maximized:
+            self.panels_area.tileSubWindows()
 
         self.top_nav.set_loaded_count(len(self.log_panels))
         self.top_nav.set_sync_scroll_enabled(len(self.log_panels) >= 2)
+
+        # If sync scroll was already toggled on before this panel was
+        # added, register it immediately — otherwise a log imported after
+        # enabling sync would silently sit outside the synced group until
+        # the investigator toggled sync off and back on.
         if self._sync_scroll_enabled:
             self._scroll_sync.register_window(source_label, panel)
 
@@ -175,13 +251,37 @@ class MainWindow(QMainWindow):
             panel = self.add_log_panel(result.source_label, color, columns)
             panel.load_rows(result.valid_entries)
 
+            # Feeds the activity frequency chart and timeline (Minal's
+            # visualisations) — they need the FULL entry set, not just
+            # LogFilter's matched subset.
+            self.dashboard.load_entries(result.source_label, result.valid_entries, color)
+
     def _on_timezone_changed(self, timezone_label: str) -> None:
         """TODO (R3 — Section 4.7.5 NormalizeTimestamp):
-            For a full implementation, this should also trigger
-            re-normalisation of all loaded timestamps via
-            TimestampNormalizer for sources whose ORIGINAL source timezone
-            assignment changes (not just the display timezone), then
-            re-render affected visualisations.
+            set_timezone_for_source() below updates SOURCE_TIMEZONE_
+            ASSIGNMENTS, which TimestampNormalizer.normalize_for_source()
+            reads — but only the NEXT time a file is parsed. Entries already
+            loaded keep whatever UTC value they were normalized to at
+            import time; this does NOT re-run normalization on already-
+            loaded entries or re-render the dashboard/timeline against the
+            new source timezone. That gap is real: changing the dropdown
+            after import currently only updates display badges, not the
+            underlying data. A correct full implementation needs to either
+            re-parse loaded files or re-localize each entry's stored
+            milliseconds, which doesn't exist yet.
+
+        NOTE: SOURCE_TIMEZONE_ASSIGNMENTS represents the ORIGINAL authoring
+        timezone TimestampNormalizer assumes when parsing a source's raw
+        timestamps — it is not really a "display" timezone in the sense of
+        reformatting already-UTC values for viewing. This dropdown
+        currently conflates the two; calling set_timezone_for_source() here
+        is what makes the dropdown affect parsing at all (its absence was
+        the actual cause of "timezone conversion isn't working" — every
+        source was silently parsed as Dubai-authored regardless of the
+        dropdown, since SOURCE_TIMEZONE_ASSIGNMENTS started empty and
+        DEFAULT_TIMEZONE is Dubai). A future iteration should likely
+        separate "what timezone was this log written in" from "what
+        timezone do I want to view times in" as two distinct controls.
         """
         label_to_iana = {
             "Dubai (GST, UTC+4)": "Asia/Dubai",
@@ -190,6 +290,7 @@ class MainWindow(QMainWindow):
         }
         iana_tz = label_to_iana.get(timezone_label, "Asia/Dubai")
         self.timeframe_selector.set_timezone(iana_tz)
+        self.dashboard.set_display_timezone(iana_tz)
 
         for source_label in self.log_panels:
             set_timezone_for_source(source_label, iana_tz)
@@ -198,8 +299,21 @@ class MainWindow(QMainWindow):
             tz_short = timezone_label.split("(")[1].split(",")[1].strip(") ")
             panel.set_timezone_label(tz_short)
 
+            # The actual fix: set_timezone_label() above only updates the
+            # small "UTC+4" badge text. Without this call, every row's
+            # TIMESTAMP column kept showing the raw, unconverted source
+            # string regardless of which timezone was selected — confirmed
+            # by importing the same WLC log under Dubai then Perth and
+            # seeing identical timestamps in both windows. The backend
+            # conversion (TimestampNormalizer) was already correct; only
+            # the display layer never read normalized_timestamp at all.
+            panel.set_display_timezone(iana_tz)
+
     def _on_sync_scroll_toggled(self, enabled: bool) -> None:
-        """Register or unregister all open log panels with ScrollSyncManager."""
+        """Register or unregister all open log panels with ScrollSyncManager
+        (Section 4.7.3 SyncScroll) — Hiba's real implementation, replacing
+        the earlier `pass` stub.
+        """
         self._sync_scroll_enabled = enabled
         self._scroll_sync.clear()
         if enabled:
@@ -243,12 +357,16 @@ class MainWindow(QMainWindow):
         summary = LogFilter.build_dashboard_summary(matched)
         self.dashboard.refresh(summary, active_sources, inactive_sources)
 
+        # Drives the activity chart's dimmed-vs-full-opacity bar split.
+        self.dashboard.set_investigation_window(config.start_time, config.end_time)
+
         total_matched = sum(len(v) for v in matched.values())
         self.dashboard.matched_card.set_value(str(total_matched))
 
     def _on_filter_cleared(self) -> None:
         for panel in self.log_panels.values():
             panel.highlight_matched([])
+        self.dashboard.set_investigation_window(None, None)
 
     def _on_row_selected(self, entry: RawLogEntry) -> None:
         # TODO (R13 — Section 4.7.4 Correlate):
@@ -257,12 +375,55 @@ class MainWindow(QMainWindow):
         self.event_detail_panel.show_event(entry, correlation_count=0)
 
     def _on_panel_scrolled(self, source_label: str, scroll_position: int) -> None:
-        """Forward scroll events to ScrollSyncManager when sync is active."""
+        """Forwards a scroll event to ScrollSyncManager when sync scroll is
+        enabled — Hiba's real Section 4.7.3 SyncScroll implementation,
+        replacing the earlier `pass` stub. ScrollSyncManager.sync_scroll()
+        itself handles the binary search and the is_syncing recursion
+        guard; this handler only needs to look up the source panel and
+        forward to it.
+        """
         if not self._sync_scroll_enabled:
             return
         source_panel = self.log_panels.get(source_label)
         if source_panel is not None:
             self._scroll_sync.sync_scroll(source_panel, scroll_position)
+
+    def _on_panel_closed(self, source_label: str) -> None:
+        """Cleans up state when a log panel is closed via its sub-window's
+        X button (or programmatically). Without this, self.log_panels and
+        self.log_subwindows would keep stale references to a destroyed
+        widget, and the tab would keep pointing at nothing.
+        """
+        self.log_panels.pop(source_label, None)
+        self.log_subwindows.pop(source_label, None)
+        self.tab_manager.remove_tab(source_label)
+        self.dashboard.remove_source(source_label)
+
+        # Now that ScrollSyncManager is wired in (_on_sync_scroll_toggled),
+        # a closed panel must be dropped from it too — otherwise sync_scroll
+        # would keep calling receive_sync_scroll() on a LogWindowWidget that
+        # no longer exists the next time another panel scrolls.
+        self._scroll_sync.unregister_window(source_label)
+
+        if f"\u00b7 {source_label}" in self.event_detail_panel.header_label.text():
+            self.event_detail_panel.clear()
+
+        self.top_nav.set_loaded_count(len(self.log_panels))
+        self.top_nav.set_sync_scroll_enabled(len(self.log_panels) >= 2)
+
+    def _on_restore_size_requested(self, source_label: str) -> None:
+        """Handles LogWindowWidget's restore-size button — a deliberate
+        bypass of QMdiArea's native title-bar maximize/restore button,
+        which testing showed can get visually or functionally stuck on
+        some platforms. This handler calls showNormal() directly on the
+        real QMdiSubWindow, then forces a sane default size.
+        """
+        sub_window = self.log_subwindows.get(source_label)
+        if sub_window is None:
+            return
+
+        sub_window.showNormal()
+        sub_window.resize(480, 420)
 
     def _on_correlated_event_clicked(self, timestamp: str) -> None:
         """TODO: scroll all open log panels to the given timestamp."""
@@ -286,6 +447,7 @@ class MainWindow(QMainWindow):
             color = mock_data.SOURCE_COLORS[log_file.source_label]
             panel = self.add_log_panel(log_file.source_label, color, columns)
             panel.load_rows(entries_by_source[log_file.source_label])
+            self.dashboard.load_entries(log_file.source_label, entries_by_source[log_file.source_label], color)
 
         stats = mock_data.MOCK_SESSION_STATS
         self.dashboard.set_session_stats(

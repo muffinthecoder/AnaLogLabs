@@ -6,6 +6,8 @@ Left side: parsed fields (timestamp, username, IP, status, source type,
 correlation count).
 Right side: complete raw record as JSON, monospace font, for forensic
 verification.
+
+Owned by: Fatima
 """
 
 import json
