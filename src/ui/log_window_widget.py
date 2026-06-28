@@ -10,14 +10,13 @@ Per the design doc's class diagram (Section 4.6):
 
 Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
-
-owned by: fatima
 """
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView, QPushButton,
+    QHeaderView, QPushButton, QAbstractItemView,
 )
 
 from src.models.data_classes import RawLogEntry
@@ -93,10 +92,11 @@ class LogWindowWidget(QWidget):
 
         # Guaranteed-working restore/resize toggle — see restore_size_
         # requested's docstring above for why this exists alongside (not
-        # instead of) the native QMdiSubWindow title-bar button. Shows a
-        # restore-style glyph since its only real job is "get me out of
-        # maximized and back to a resizable window" — MainWindow decides
-        # exactly what that means (showNormal() + a sane default size).
+        # instead of) the native QMdiSubWindow title-bar button. Uses a
+        # text label with a visible border (rather than a muted icon-only
+        # glyph) because the icon version blended into the dark background
+        # and was effectively invisible — found during testing when it was
+        # only ever located by accident.
         self.restore_button = QPushButton("Restore window size")
         self.restore_button.setObjectName("RestoreSizeButton")
         self.restore_button.setFixedHeight(20)
@@ -142,6 +142,39 @@ class LogWindowWidget(QWidget):
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
+
+        # Floor on how narrow a dragged column can get — without this, an
+        # investigator (or the auto-sizing pass in load_rows()) could drag
+        # a column down to near-zero width and lose track of which column
+        # is which.
+        header.setMinimumSectionSize(60)
+
+        # Long values (command lines, raw syslog text) wrapping to multiple
+        # lines would make every row a different height, which breaks the
+        # visual rhythm of a forensic table where row N and row N+1 should
+        # be directly comparable at a glance. Horizontal scrolling (set
+        # below) is the intended way to see more of a long value instead.
+        self.table_view.setWordWrap(False)
+        self.table_view.verticalHeader().setDefaultSectionSize(22)
+
+        # Alternating row shading makes it easier to track a row across a
+        # wide, horizontally-scrolled table — useful here specifically
+        # because Interactive mode (above) means rows are often wider than
+        # the visible panel.
+        #
+        # setAlternatingRowColors(True) alone only toggles WHETHER rows
+        # alternate — it does not set what the alternate color actually is.
+        # That comes from QPalette.AlternateBase, which defaults to Qt's
+        # light-theme grey (~#f7f7f7) and was never set here, so every
+        # other row was rendering near-white against this dark theme,
+        # which looked like a rendering bug rather than a subtle stripe.
+        # Setting it to a shade close to the existing dark background
+        # fixes that without losing the row-tracking benefit.
+        self.table_view.setAlternatingRowColors(True)
+        table_palette = self.table_view.palette()
+        table_palette.setColor(table_palette.ColorRole.Base, QColor("#0e1320"))
+        table_palette.setColor(table_palette.ColorRole.AlternateBase, QColor("#131a2e"))
+        self.table_view.setPalette(table_palette)
 
         # Horizontal scrolling picks up wherever total column width exceeds
         # the panel's width — this is what actually prevents columns from
@@ -203,9 +236,31 @@ class LogWindowWidget(QWidget):
         # view, or by dragging the header, if they need to see more.
         header = self.table_view.horizontalHeader()
         max_column_width = 220
+
+        # Known fields get a sensible floor even when their actual content
+        # is short — e.g. a "status" column full of "OK" would otherwise
+        # auto-size to a few px, which looks cramped and invites accidental
+        # mis-clicks right next to it. Unknown fields fall back to a small
+        # generic floor (80px) since log_parser.py's _FIELD_NAME_ALIASES
+        # covers many but not all possible source columns.
+        column_min_widths = {
+            "timestamp": 160,
+            "date": 160,
+            "username": 130,
+            "ip_address": 120,
+            "status": 70,
+            "action_type": 140,
+            "hostname": 130,
+        }
         for col in range(self.table_model.columnCount()):
-            if header.sectionSize(col) > max_column_width:
+            width = header.sectionSize(col)
+            if width > max_column_width:
                 header.resizeSection(col, max_column_width)
+                continue
+            column_key = self.table_model.column_key_at(col)
+            min_width = column_min_widths.get(column_key, 80)
+            if width < min_width:
+                header.resizeSection(col, min_width)
 
         self._update_scroll_indicator(0)
 
@@ -215,18 +270,50 @@ class LogWindowWidget(QWidget):
         self.table_model.highlight_matched(matched_row_indices)
 
     def receive_sync_scroll(self, row_index: int) -> None:
-        """Called by ScrollSyncManager — sets scroll position WITHOUT emitting
-        the `scrolled` signal again, to avoid recursive sync loops
-        (Section 4.7.3 step 4).
-
-        TODO (Fatima — Section 4.7.3):
-            self.table_view.scrollTo(...) using row_index, blocking signals
-            on verticalScrollBar() for the duration of the call.
+        """Called by ScrollSyncManager — scrolls this panel to row_index
+        WITHOUT emitting the scrolled signal, preventing recursive sync
+        loops (Section 4.7.3 step 4).
         """
-        pass
+        if not self.table_model.rowCount():
+            return
+
+        # Clamp to valid range — ScrollSyncManager's binary search always
+        # returns a valid index for ITS OWN entries list, but that list can
+        # have a different length than this panel's, so the clamp here is
+        # what actually guards against an out-of-range row_index.
+        row_index = max(0, min(row_index, self.table_model.rowCount() - 1))
+
+        # Block the scroll signal so ScrollSyncManager doesn't pick this up
+        # as a new user-initiated scroll and trigger another sync round —
+        # the same recursion the docstring above warns about.
+        scrollbar = self.table_view.verticalScrollBar()
+        scrollbar.blockSignals(True)
+        try:
+            index = self.table_model.index(row_index, 0)
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
+            self.scroll_position = scrollbar.value()
+            # _on_scroll() is what normally calls this, but it's skipped
+            # here since blockSignals(True) prevents it from firing — so
+            # the slider/timestamp label need updating directly, or they'd
+            # drift out of sync with the table every time another panel's
+            # scroll drives this one via ScrollSyncManager.
+            self._update_scroll_indicator(row_index)
+        finally:
+            scrollbar.blockSignals(False)
 
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)
+
+    def set_display_timezone(self, iana_tz: str) -> None:
+        """Converts and re-renders the TIMESTAMP column in iana_tz (e.g.
+        "Asia/Dubai") — separate from set_timezone_label() above, which
+        only updates the small badge text and never touched the actual
+        table data. Without this call, the badge would correctly show
+        "UTC+8" after switching to Perth while every row still displayed
+        the same raw, unconverted timestamp string underneath it.
+        """
+        self.table_model.set_display_timezone(iana_tz)
+        self._update_scroll_indicator(self.scroll_position)
 
     # -- Internal handlers ---------------------------------------------------------
 
@@ -279,16 +366,14 @@ class LogWindowWidget(QWidget):
         self.scroll_indicator.setValue(position_pct)
 
         entry = self.table_model.entry_at(row)
-        if entry is not None and entry.normalized_timestamp is not None:
-            self.scroll_timestamp_label.setText(
-                entry.normalized_timestamp.utc_datetime.strftime("%H:%M:%S")
-            )
-        elif entry is not None:
-            # Falls back to the raw display string for rows Hiba's
-            # normalizer couldn't parse (normalized_timestamp is None) —
-            # still better than leaving the label stuck at "--:--" for
-            # every unparsed row.
-            self.scroll_timestamp_label.setText(str(entry.fields.get("timestamp", "--:--")))
+        if entry is not None:
+            # Reuses LogTableModel._format_timestamp() rather than
+            # duplicating the UTC-to-display-timezone conversion here —
+            # this label had the exact same bug as the TIMESTAMP column
+            # (showed raw utc_datetime regardless of the selected display
+            # timezone) until both were fixed to go through one shared
+            # conversion path.
+            self.scroll_timestamp_label.setText(self.table_model.format_timestamp(entry))
 
     def closeEvent(self, event) -> None:
         """Fired when this panel's containing QMdiSubWindow is closed via

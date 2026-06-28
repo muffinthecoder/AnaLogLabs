@@ -9,6 +9,7 @@ logic in LogWindowWidget do not need to change.
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
+import pytz
 
 from src.models.data_classes import RawLogEntry
 
@@ -43,6 +44,15 @@ class LogTableModel(QAbstractTableModel):
         self._matched_indices: set[int] = set()
         self._selected_row: int | None = None
 
+        # The timezone the TIMESTAMP column is currently rendered in. This
+        # is intentionally separate from each entry's normalized_timestamp
+        # (always stored internally as UTC) and from SOURCE_TIMEZONE_
+        # ASSIGNMENTS (the timezone a source's raw timestamps are assumed
+        # to be AUTHORED in, used only at parse time). This is the
+        # investigator-facing DISPLAY timezone — what TopNavBar's dropdown
+        # should actually control, separate from the parsing assumption.
+        self._display_tz = "Asia/Dubai"
+
     # -- Qt required overrides -------------------------------------------------
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -66,11 +76,12 @@ class LogTableModel(QAbstractTableModel):
         column_key = self._columns[index.column()]
 
         if role == Qt.DisplayRole:
-            # TODO (Hiba — Section 3.4 Data Structures and Operations):
-            #   entry.fields is the raw dict mapped by LogParser. Column keys
-            #   here are placeholders ("timestamp", "username", "ip_address",
-            #   "status") — confirm exact field names once the field mapper
-            #   (_map_fields in Section 4.7.1) is implemented.
+            if column_key == "timestamp":
+                return self.format_timestamp(entry)
+
+            # entry.fields is the raw dict mapped by LogParser._map_fields()
+            # — every other column displays straight from it since only
+            # the timestamp column needs timezone conversion before display.
             return str(entry.fields.get(column_key, ""))
 
         if role == Qt.BackgroundRole:
@@ -93,7 +104,53 @@ class LogTableModel(QAbstractTableModel):
 
         return None
 
+    def format_timestamp(self, entry: RawLogEntry) -> str:
+        """Renders the TIMESTAMP column from entry.normalized_timestamp
+        (always UTC internally) converted into self._display_tz, rather
+        than entry.fields["timestamp"] (the raw original string from the
+        source file).
+
+        This is the actual fix for a bug where the table showed identical
+        text regardless of which timezone was selected: the raw string
+        ("Mar 25 09:30:14") was being displayed verbatim every time, while
+        the correctly-converted normalized_timestamp.utc_datetime sat on
+        the entry unused. Confirmed during debugging that the backend
+        conversion itself was correct (Dubai vs Perth produced UTC values
+        4 hours apart, as expected) — only the display layer was wrong.
+
+        Falls back to the raw string when normalized_timestamp is None
+        (TimestampNormalizer couldn't parse this row, or hasn't run at
+        all) — this is a legitimate fallback, not silently masking a bug,
+        since not every row is guaranteed to parse (Section 4.7.1's error
+        handling deliberately keeps unparseable rows visible).
+        """
+        if entry.normalized_timestamp is None:
+            return str(entry.fields.get("timestamp", ""))
+
+        try:
+            tz_obj = pytz.timezone(self._display_tz)
+        except pytz.UnknownTimeZoneError:
+            tz_obj = pytz.timezone("Asia/Dubai")
+
+        local_dt = entry.normalized_timestamp.utc_datetime.astimezone(tz_obj)
+        ms = entry.normalized_timestamp.milliseconds
+        return local_dt.strftime("%H:%M:%S") + f".{ms:03d}"
+
     # -- Public API used by LogWindowWidget -------------------------------------
+
+    def set_display_timezone(self, tz_name: str) -> None:
+        """Called by LogWindowWidget.set_timezone_label() (or directly by
+        MainWindow) whenever the investigator changes the timezone
+        dropdown. Triggers a full repaint so every visible TIMESTAMP cell
+        re-renders in the new timezone immediately.
+        """
+        if self._display_tz == tz_name:
+            return
+        self._display_tz = tz_name
+        if self._entries:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
 
     def load_entries(self, entries: list[RawLogEntry]) -> None:
         """Replace all rows. Called after import (R1) or after a new file load."""
@@ -127,3 +184,15 @@ class LogTableModel(QAbstractTableModel):
 
     def get_entries(self) -> list[RawLogEntry]:
         return self._entries
+
+    def column_key_at(self, column: int) -> str | None:
+        """Returns the raw field key (e.g. "username", "ip_address") for a
+        given column index — NOT the upper-cased display header text that
+        headerData() returns. Needed so callers like LogWindowWidget can
+        apply per-field rules (e.g. a minimum width for "username") keyed
+        on the same canonical field names log_parser.py's _map_fields()
+        produces, without having to lower-case/guess from the display text.
+        """
+        if 0 <= column < len(self._columns):
+            return self._columns[column]
+        return None
