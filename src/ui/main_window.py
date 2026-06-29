@@ -29,6 +29,7 @@ from src.ui.timeframe_selector import TimeFrameSelector
 from src.ui.log_window_widget import LogWindowWidget
 from src.ui.event_detail_panel import EventDetailPanel
 from src.ui.investigation_dashboard import InvestigationDashboard
+from src.ui.timezone_import_dialog import TimezoneImportDialog
 
 from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
@@ -227,34 +228,74 @@ class MainWindow(QMainWindow):
     # -- Signal handlers -----------------------------------------------------------
 
     def _on_import_logs(self) -> None:
-        """R1 — Section 4.7.1 ImportAndParse: Wire LogParser to UI."""
+        """R1 — Section 4.7.1 ImportAndParse.
+
+        Flow:
+            1. File picker — one or more log files.
+            2. Single timezone dialog — asks what timezone the investigator
+               wants to VIEW times in (not per-file source timezones).
+            3. Parse files via LogParser.
+            4. For each result, create a panel and load entries.
+            5. Apply the chosen display timezone to all new panels immediately.
+
+        Timestamp rules (handled in TimestampNormalizer, not here):
+            - Timestamps ending in Z are already UTC — converted straight to
+              display tz.
+            - Timestamps without Z are assumed Perth (AWST, UTC+8) — converted
+              to UTC first, then to display tz.
+        """
         file_paths, _ = QFileDialog.getOpenFileNames(
             self, "Import log files", "", "Log files (*.csv *.xlsx *.txt)"
         )
         if not file_paths:
             return
 
+        # Single dialog — asks for display timezone only, not per-file source tz.
+        dialog = TimezoneImportDialog(file_paths, parent=self)
+        if dialog.exec() != TimezoneImportDialog.Accepted:
+            return  # investigator cancelled; do not import
+
+        display_tz = dialog.display_timezone  # IANA string, e.g. "Asia/Dubai"
+
         results = LogParser.parse_files(file_paths)
-        for result in results:
+
+        _PANEL_COLOURS = [
+            "#4A90D9", "#7c3aed", "#22c55e", "#f59e0b",
+            "#ef4444", "#38bdf8", "#ec4899", "#00c4e8",
+        ]
+        existing_count = len(self.log_panels)
+
+        for i, result in enumerate(results):
             if result.failed:
-                # TODO: show error dialog with result.file_error
-                print(f"File error: {result.file_error}")
+                print(f"File error [{result.source_label}]: {result.file_error}")
                 continue
 
             if not result.valid_entries:
-                # TODO: show warning dialog — file parsed but had 0 valid rows
                 print(f"No valid entries in {result.source_label}")
                 continue
 
+            color = _PANEL_COLOURS[(existing_count + i) % len(_PANEL_COLOURS)]
             columns = list(result.valid_entries[0].fields.keys())
-            color = "#4A90D9"  # default blue
             panel = self.add_log_panel(result.source_label, color, columns)
             panel.load_rows(result.valid_entries)
-
-            # Feeds the activity frequency chart and timeline (Minal's
-            # visualisations) — they need the FULL entry set, not just
-            # LogFilter's matched subset.
             self.dashboard.load_entries(result.source_label, result.valid_entries, color)
+
+        # Apply display timezone to every panel (including ones just added).
+        tz_label_map = {
+            "Asia/Dubai": "Dubai (GST, UTC+4)",
+            "Asia/Singapore": "Singapore (SGT, UTC+8)",
+            "Australia/Perth": "Perth (AWST, UTC+8)",
+        }
+        tz_label = tz_label_map.get(display_tz, display_tz)
+        tz_short = tz_label.split("(")[1].split(",")[1].strip(") ")
+
+        for panel in self.log_panels.values():
+            panel.set_timezone_label(tz_short)
+            panel.set_display_timezone(display_tz)
+
+        self.dashboard.set_display_timezone(display_tz)
+        self.timeframe_selector.set_timezone(display_tz)
+
 
     def _on_timezone_changed(self, timezone_label: str) -> None:
         """TODO (R3 — Section 4.7.5 NormalizeTimestamp):

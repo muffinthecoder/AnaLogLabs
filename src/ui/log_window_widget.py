@@ -61,7 +61,22 @@ class LogWindowWidget(QWidget):
 
         self._build_ui(columns)
 
+    @staticmethod
+    def _prepend_original_ts_column(columns: list[str]) -> list[str]:
+        """Inserts "original_timestamp" as the first column so investigators
+        always see the raw, un-converted timestamp from the source file
+        alongside the display-timezone-converted "timestamp" column.
+
+        Skipped if it is already present (idempotent) so this helper is safe
+        to call during both initial construction and any later column rebuild.
+        """
+        if "original_timestamp" in columns:
+            return columns
+        return ["original_timestamp"] + list(columns)
+
     def _build_ui(self, columns: list[str]) -> None:
+        # Inject the "Original Log Time" column before any source columns.
+        columns = self._prepend_original_ts_column(columns)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)

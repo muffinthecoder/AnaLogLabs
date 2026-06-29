@@ -27,7 +27,7 @@ SUPPORTED_TIMEZONES = {
 #   prototype, every source defaults to Dubai unless explicitly set.
 SOURCE_TIMEZONE_ASSIGNMENTS: dict[str, str] = {}
 
-DEFAULT_TIMEZONE = "Asia/Dubai"
+DEFAULT_TIMEZONE = "Australia/Perth"
 
 
 def get_timezone_for_source(source_label: str) -> str:

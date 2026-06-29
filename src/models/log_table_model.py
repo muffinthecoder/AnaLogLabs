@@ -65,7 +65,12 @@ class LogTableModel(QAbstractTableModel):
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:
-            return self._columns[section].upper()
+            key = self._columns[section]
+            # Give the virtual column a human-readable header rather than
+            # the internal snake_case key name.
+            if key == "original_timestamp":
+                return "ORIGINAL LOG TIME"
+            return key.upper()
         return str(section)
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
@@ -76,6 +81,14 @@ class LogTableModel(QAbstractTableModel):
         column_key = self._columns[index.column()]
 
         if role == Qt.DisplayRole:
+            # "original_timestamp" is a virtual column injected by
+            # LogWindowWidget (not a real key in entry.fields) — shows the
+            # raw unmodified timestamp string from the source file so
+            # investigators can always compare the display-tz-converted value
+            # against what was actually recorded.
+            if column_key == "original_timestamp":
+                return self.format_raw_timestamp(entry)
+
             if column_key == "timestamp":
                 return self.format_timestamp(entry)
 
@@ -103,6 +116,20 @@ class LogTableModel(QAbstractTableModel):
             return COLOR_DEFAULT_TEXT
 
         return None
+
+    def format_raw_timestamp(self, entry: RawLogEntry) -> str:
+        """Returns the original timestamp string exactly as it appeared in the
+        source log file — no timezone conversion, no reformatting.  Used by
+        the "Original Log Time" column so investigators can always compare the
+        display-timezone-converted value against what was actually recorded.
+
+        Falls back to entry.fields["timestamp"] if raw_timestamp is empty (e.g.
+        when a mock entry was constructed without setting raw_timestamp), then
+        to the empty string so the cell is never None.
+        """
+        if entry.raw_timestamp and entry.raw_timestamp.strip():
+            return entry.raw_timestamp
+        return str(entry.fields.get("timestamp", ""))
 
     def format_timestamp(self, entry: RawLogEntry) -> str:
         """Renders the TIMESTAMP column from entry.normalized_timestamp
