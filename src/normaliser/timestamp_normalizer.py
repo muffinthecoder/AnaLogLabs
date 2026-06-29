@@ -4,11 +4,6 @@ Section 4.7.5 of the design document (R3).
 
 Owned by: Hiba
 Consumed by: src/parser/log_parser.py (Pooja's module)
-
-Fixes applied for real log data (Week 1 integration):
-    - Added Z-suffix ISO 8601 formats (files 2–8: all sign-in CSVs use
-      "2026-03-25T03:24:52Z")
-    - Added Cisco WLC syslog format ("Mar 25 09:30:14")
 """
 
 from datetime import datetime
@@ -95,11 +90,13 @@ class TimestampNormalizer:
 
         tz_obj = pytz.timezone(source_tz)
 
-        # ── FIXED SAFE TIMEZONE HANDLING ────────────────────────────────
+        # ── FIXED CONSISTENT TIMEZONE HANDLING ────────────────────────
         if cleaned.endswith("Z"):
-            utc_dt = pytz.UTC.localize(parsed_dt)
+            # already UTC timestamp
+            utc_dt = parsed_dt.replace(tzinfo=pytz.UTC)
             is_dst_adjusted = False
         else:
+            # local timestamp → convert to UTC
             localised_dt = tz_obj.localize(parsed_dt)
             utc_dt = localised_dt.astimezone(pytz.UTC)
             is_dst_adjusted = bool(localised_dt.dst())
@@ -114,3 +111,4 @@ class TimestampNormalizer:
     @staticmethod
     def normalize_for_source(raw_ts: str, source_label: str) -> NormalizedTimestamp:
         source_tz = get_timezone_for_source(source_label)
+        return TimestampNormalizer.normalize_timestamp(raw_ts, source_tz)
