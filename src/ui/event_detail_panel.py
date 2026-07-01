@@ -12,9 +12,11 @@ Owned by: Fatima
 
 import json
 
+import pytz
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame
 
 from src.models.data_classes import RawLogEntry
+from src.normaliser.timezone_map import utc_offset_label, DEFAULT_TIMEZONE
 
 
 STATUS_COLORS = {
@@ -34,9 +36,9 @@ class FieldDisplay(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        key_label = QLabel(key.upper())
-        key_label.setProperty("class", "FieldKey")
-        layout.addWidget(key_label)
+        self.key_label = QLabel(key.upper())
+        self.key_label.setProperty("class", "FieldKey")
+        layout.addWidget(self.key_label)
 
         self.value_label = QLabel(value)
         self.value_label.setProperty("class", "FieldValue")
@@ -57,6 +59,12 @@ class EventDetailPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("EventDetailPanel")
         self.setFixedHeight(110)
+
+        # R3 — the detail timestamp is rendered in this display timezone,
+        # kept in step with the top-nav dropdown via set_display_timezone().
+        self._display_tz = DEFAULT_TIMEZONE
+        self._last_entry: RawLogEntry | None = None
+        self._last_correlation = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -80,7 +88,9 @@ class EventDetailPanel(QWidget):
         self.fields_container.setContentsMargins(12, 8, 12, 8)
         self.fields_container.setSpacing(16)
 
-        self.field_timestamp = FieldDisplay("Timestamp (UTC+4)", "--", value_color="#00c4e8")
+        self.field_timestamp = FieldDisplay(
+            f"Timestamp ({utc_offset_label(self._display_tz)})", "--", value_color="#00c4e8"
+        )
         self.field_username = FieldDisplay("Username", "--")
         self.field_ip = FieldDisplay("IP address", "--")
         self.field_status = FieldDisplay("Status", "--")
@@ -117,6 +127,9 @@ class EventDetailPanel(QWidget):
             (Section 4.7.1 step 3 _map_fields). Update .get() keys below to
             match the canonical field names once finalised.
         """
+        self._last_entry = entry
+        self._last_correlation = correlation_count
+
         username = entry.fields.get("username", entry.fields.get("account", "--"))
         ip_address = entry.fields.get("ip_address", entry.fields.get("source_ip", "--"))
         status = entry.fields.get("status", "--")
@@ -126,9 +139,16 @@ class EventDetailPanel(QWidget):
             f"EVENT DETAIL — {username} \u00b7 {entry.fields.get('timestamp', '--')} \u00b7 {entry.source_label}"
         )
 
+        # R3 — render the normalized (UTC) timestamp in the current display
+        # timezone, matching the log table and every other display element.
         timestamp_display = entry.fields.get("timestamp", "--")
         if entry.normalized_timestamp is not None:
-            timestamp_display = entry.normalized_timestamp.utc_datetime.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            try:
+                tz_obj = pytz.timezone(self._display_tz)
+            except pytz.UnknownTimeZoneError:
+                tz_obj = pytz.timezone(DEFAULT_TIMEZONE)
+            local_dt = entry.normalized_timestamp.utc_datetime.astimezone(tz_obj)
+            timestamp_display = local_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
         self.field_timestamp.set_value(timestamp_display, value_color="#00c4e8")
         self.field_username.set_value(username)
@@ -145,6 +165,17 @@ class EventDetailPanel(QWidget):
         raw_payload["row_index"] = entry.row_index
         self.raw_json_label.setText(json.dumps(raw_payload))
 
+    def set_display_timezone(self, tz_name: str) -> None:
+        """R3 — switch the timestamp field to a new display timezone and
+        re-render the currently shown event (if any) so it updates live.
+        """
+        self._display_tz = tz_name
+        self.field_timestamp.key_label.setText(f"TIMESTAMP ({utc_offset_label(tz_name)})")
+        if self._last_entry is not None:
+            self.show_event(self._last_entry, self._last_correlation)
+
     def clear(self) -> None:
         self.header_label.setText("EVENT DETAIL — no event selected")
         self.raw_json_label.setText("Select an event to view raw data.")
+        self._last_entry = None
+        self._last_correlation = 0

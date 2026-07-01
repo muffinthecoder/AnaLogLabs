@@ -2,3 +2,8 @@
 PySide6>=6.6.0
 openpyxl>=3.1.0
 pytz>=2024.1
+pandas>=2.0.0
+pyqtgraph>=0.13.0
+# Optional — improves system-timezone auto-detection (R2). Falls back to the
+# stdlib if not installed.
+tzlocal>=5.0

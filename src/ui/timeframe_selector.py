@@ -12,13 +12,32 @@ Owned by: Fatima
 
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton
 
 from src.models.data_classes import FilterConfig
+
+# R4 — the investigation window is automatically widened by this much on each
+# side, so an investigator asking for "14:00 to 16:00" actually sees events
+# from 13:59 to 16:01. Catches events that land right on the boundary of the
+# period of interest.
+INVESTIGATION_OFFSET = timedelta(minutes=1)
+
+# Accepted input formats for the Start/End fields. Tried in order; the first
+# that parses wins. Covers the strict ms form plus the common no-ms and
+# 'T'-separated ISO variants, so investigators aren't forced to type
+# milliseconds they don't have.
+_INPUT_FORMATS = [
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+]
 
 
 class TimeFrameSelector(QWidget):
@@ -30,7 +49,7 @@ class TimeFrameSelector(QWidget):
     # Emitted when "Clear Filter" is clicked.
     filter_cleared = Signal()
 
-    def __init__(self, timezone: str = "Asia/Dubai", parent=None):
+    def __init__(self, timezone: str = "Australia/Perth", parent=None):
         super().__init__(parent)
         self.timezone = timezone
         self.use_24hr = True
@@ -61,6 +80,13 @@ class TimeFrameSelector(QWidget):
         self.end_input.setPlaceholderText("YYYY-MM-DD HH:MM:SS.mmm")
         layout.addWidget(self.end_input)
 
+        # R4 — make the auto-applied boundary offset visible so the widened
+        # window isn't a surprise ("why am I seeing 13:59 events?").
+        offset_note = QLabel("A ±1 min offset is applied automatically.")
+        offset_note.setStyleSheet("font-size: 9px; color: #4a5a7a;")
+        offset_note.setWordWrap(True)
+        layout.addWidget(offset_note)
+
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("font-size: 10px; color: #e06060;")
         self.error_label.setWordWrap(True)
@@ -77,14 +103,23 @@ class TimeFrameSelector(QWidget):
         self.clear_button.clicked.connect(self._on_clear_clicked)
         layout.addWidget(self.clear_button)
 
+    def _parse_user_datetime(self, text: str) -> datetime | None:
+        """Parses a Start/End field against the accepted format list, returning
+        a naive datetime or None if nothing matched.
+        """
+        for fmt in _INPUT_FORMATS:
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return None
+
     def _on_apply_clicked(self) -> None:
         """Section 4.7.2 ApplyFilter step 1 — validation before emitting.
 
-        TODO (Fatima/Hiba):
-            Replace the naive datetime.strptime calls below with the real
-            parser that supports the format chain from Section 4.7.5
-            NormalizeTimestamp (ISO 8601, DD/MM/YYYY, MM-DD-YYYY, compact).
-            Currently only accepts "YYYY-MM-DD HH:MM:SS.mmm" exactly.
+        The entered times are interpreted in the investigator's selected
+        DISPLAY timezone, converted to UTC, then widened by INVESTIGATION_
+        OFFSET on each side (R4) before being handed to LogFilter.
         """
         self.error_label.hide()
 
@@ -95,10 +130,9 @@ class TimeFrameSelector(QWidget):
             self._show_error("Both start and end times are required.")
             return
 
-        try:
-            start_dt_naive = datetime.strptime(start_text, "%Y-%m-%d %H:%M:%S.%f")
-            end_dt_naive = datetime.strptime(end_text, "%Y-%m-%d %H:%M:%S.%f")
-        except ValueError:
+        start_dt_naive = self._parse_user_datetime(start_text)
+        end_dt_naive = self._parse_user_datetime(end_text)
+        if start_dt_naive is None or end_dt_naive is None:
             self._show_error("Invalid date/time format entered.")
             return
 
@@ -112,6 +146,11 @@ class TimeFrameSelector(QWidget):
         tz_obj = pytz.timezone(self.timezone)
         start_dt = tz_obj.localize(start_dt_naive).astimezone(pytz.UTC)
         end_dt = tz_obj.localize(end_dt_naive).astimezone(pytz.UTC)
+
+        # R4 — widen the window by ±1 minute so boundary events are caught.
+        # Applied on the UTC datetimes since an offset is timezone-agnostic.
+        start_dt -= INVESTIGATION_OFFSET
+        end_dt += INVESTIGATION_OFFSET
 
         config = FilterConfig(
             start_time=start_dt,
