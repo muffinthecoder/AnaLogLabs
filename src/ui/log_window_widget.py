@@ -12,11 +12,13 @@ Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
 """
 
+from datetime import timedelta
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QAction
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView, QPushButton, QAbstractItemView,
+    QHeaderView, QPushButton, QAbstractItemView, QMenu,
 )
 
 from src.models.data_classes import RawLogEntry
@@ -51,6 +53,15 @@ class LogWindowWidget(QWidget):
     # QMdiSubWindow's showNormal(), bypassing whatever the native button
     # is doing.
     restore_size_requested = Signal(str)  # source_label
+
+    # R1 — emitted when the header "Pop out" button is clicked. MainWindow
+    # detaches this panel from the MDI area into a free-floating top-level
+    # window that can be moved anywhere on the desktop.
+    detach_requested = Signal(str)  # source_label
+
+    # R5 — emitted whenever a row is flagged/unflagged here, so MainWindow can
+    # recompute the cross-file markers shown in every other open panel.
+    flags_changed = Signal(str)  # source_label
 
     def __init__(self, source_label: str, color_hex: str, columns: list[str], parent=None):
         super().__init__(parent)
@@ -112,6 +123,24 @@ class LogWindowWidget(QWidget):
             lambda: self.restore_size_requested.emit(self.source_label)
         )
         header_layout.addWidget(self.restore_button)
+
+        # R1 — pop this panel out into a free-floating desktop window. Styled
+        # like the restore button so the two header actions read as a pair.
+        self.detach_button = QPushButton("Pop out")
+        self.detach_button.setObjectName("DetachButton")
+        self.detach_button.setFixedHeight(20)
+        self.detach_button.setToolTip("Detach this log into a movable floating window")
+        self.detach_button.setStyleSheet(
+            "QPushButton#DetachButton { "
+            "background-color: transparent; color: #00c4e8; border: 1px solid #00c4e8; "
+            "font-size: 10px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#DetachButton:hover { "
+            "background-color: #00c4e8; color: #0a0e1a; }"
+        )
+        self.detach_button.clicked.connect(
+            lambda: self.detach_requested.emit(self.source_label)
+        )
+        header_layout.addWidget(self.detach_button)
 
         self.row_count_label = QLabel("0 rows")
         self.row_count_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
@@ -184,6 +213,11 @@ class LogWindowWidget(QWidget):
         self.table_view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
 
         self.table_view.clicked.connect(self._on_row_clicked)
+
+        # R5 — right-click a row to flag/unflag it. A flagged event is marked
+        # here and mirrored at the corresponding time in every other panel.
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_context_menu)
 
         # TODO (Section 4.7.3 SyncScroll):
         #   Connect verticalScrollBar().valueChanged to _on_scroll() so
@@ -301,6 +335,25 @@ class LogWindowWidget(QWidget):
         finally:
             scrollbar.blockSignals(False)
 
+    def flagged_timestamps(self) -> list:
+        """R5 — UTC datetimes (ms-inclusive) of every row flagged in this
+        file, used by MainWindow to place cross-file markers elsewhere.
+        Rows without a normalized timestamp can't be positioned in time, so
+        they're skipped here.
+        """
+        stamps = []
+        for entry in self.table_model.flagged_entries():
+            nts = entry.normalized_timestamp
+            if nts is not None:
+                stamps.append(nts.utc_datetime + timedelta(milliseconds=nts.milliseconds))
+        return stamps
+
+    def set_cross_markers(self, markers: dict) -> None:
+        """R5 — apply markers (row_index -> origin color hex) computed by
+        MainWindow from other files' flags.
+        """
+        self.table_model.set_cross_markers(markers)
+
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)
 
@@ -322,6 +375,25 @@ class LogWindowWidget(QWidget):
         if entry is not None:
             self.table_model.set_selected_row(index.row())
             self.row_selected.emit(entry)
+
+    def _on_context_menu(self, pos) -> None:
+        """R5 — build the right-click flag menu for the row under the cursor."""
+        index = self.table_view.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+
+        menu = QMenu(self)
+        if self.table_model.is_flagged(row):
+            action = QAction("⚑ Remove flag", self)
+        else:
+            action = QAction("⚑ Flag this event", self)
+        menu.addAction(action)
+
+        chosen = menu.exec(self.table_view.viewport().mapToGlobal(pos))
+        if chosen is action:
+            self.table_model.toggle_flag(row)
+            self.flags_changed.emit(self.source_label)
 
     def _on_scroll(self, value: int) -> None:
         """Fires on every vertical scrollbar movement (mouse wheel, drag,

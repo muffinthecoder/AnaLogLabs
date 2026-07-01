@@ -14,9 +14,23 @@ Fixes applied for real log data (Week 1 integration):
       normalizer rejected valid timestamps.
 """
 
+import re
+import warnings
 from datetime import datetime
 
 import pytz
+
+# pandas gives us robust, format-flexible timestamp parsing AND automatic
+# detection of timestamps that already carry a timezone offset (R2 "use pandas"
+# + "check if auto detect can work"). It's imported defensively so the
+# strptime-based format chain below still works even if pandas is unavailable
+# on a given machine — pandas is only ever used as an enhancement/fallback.
+try:
+    import pandas as pd
+    _PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None
+    _PANDAS_AVAILABLE = False
 
 from src.models.data_classes import NormalizedTimestamp
 from src.normaliser.timezone_map import get_timezone_for_source, SUPPORTED_TIMEZONES
@@ -109,6 +123,74 @@ def _parse_syslog_ts(raw_ts: str) -> datetime | None:
     return None
 
 
+# Matches a trailing explicit timezone: "Z"/"z", or a "+HH:MM" / "-HHMM" /
+# "+HH" numeric offset at the end of the string. Used to decide whether a raw
+# timestamp already carries its own timezone (R2 auto-detection) BEFORE handing
+# it to pandas — this both avoids unnecessary work on the common naive case and
+# sidesteps pandas' dayfirst-ambiguity warning for DD/MM strings, which never
+# reach the aware path.
+_TZ_AWARE_RE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2}|[+-]\d{2})$")
+
+
+def _looks_tz_aware(cleaned: str) -> bool:
+    return bool(_TZ_AWARE_RE.search(cleaned))
+
+
+def _try_pandas_aware(cleaned: str) -> datetime | None:
+    """R2 auto-detection: if the raw string ALREADY carries an explicit
+    timezone (an ISO-8601 "Z" or a numeric offset like "+04:00"), let pandas
+    parse it and return the resulting timezone-AWARE datetime.
+
+    Returns None when pandas is unavailable, the string doesn't look tz-aware,
+    it can't be parsed, or the parsed value is naive — in which case the caller
+    falls back to the naive format chain and localises using the assigned
+    source timezone instead.
+
+    This is what fixes the long-standing latent bug where a "...Z" (already
+    UTC) timestamp was being localised a SECOND time to the source zone: an
+    explicit offset now wins over the source-zone assumption, which is the
+    only correct behaviour.
+    """
+    if not _PANDAS_AVAILABLE or not _looks_tz_aware(cleaned):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ts = pd.to_datetime(cleaned)
+    except Exception:
+        return None
+    # pandas returns a NaT for unparseable input, and NaT.tzinfo is None.
+    if ts is None or pd.isna(ts):
+        return None
+    if getattr(ts, "tzinfo", None) is None:
+        return None  # naive — not an embedded-offset timestamp
+    return ts.to_pydatetime()
+
+
+def _try_pandas_naive(cleaned: str) -> datetime | None:
+    """Last-resort parse for a naive timestamp the strptime chain and the
+    syslog fallback both missed. dayfirst=True matches the client's log
+    conventions (DD/MM/YYYY), and utc=False keeps the result naive so the
+    caller can localise it with the correct SOURCE timezone.
+    """
+    if not _PANDAS_AVAILABLE:
+        return None
+    try:
+        with warnings.catch_warnings():
+            # Format is genuinely unknown at this last-resort stage, so the
+            # dayfirst-ambiguity warning is expected noise — suppress it.
+            warnings.simplefilter("ignore")
+            ts = pd.to_datetime(cleaned, dayfirst=True)
+    except Exception:
+        return None
+    if ts is None or pd.isna(ts):
+        return None
+    if getattr(ts, "tzinfo", None) is not None:
+        # Shouldn't happen (aware case is handled earlier) but guard anyway.
+        return None
+    return ts.to_pydatetime()
+
+
 class TimestampNormalizer:
     """Converts raw timestamp strings into UTC-aware NormalizedTimestamp objects."""
 
@@ -136,7 +218,21 @@ class TimestampNormalizer:
 
         cleaned = raw_ts.strip()
 
-        # ── Step 1: Try the main format chain ─────────────────────────────
+        # ── Step 0: Auto-detect an embedded timezone (R2) ─────────────────
+        # If the raw string already specifies its own offset ("...Z" or
+        # "+04:00"), that offset is authoritative — convert straight to UTC
+        # and do NOT re-localise using source_tz.
+        aware_dt = _try_pandas_aware(cleaned)
+        if aware_dt is not None:
+            utc_dt = aware_dt.astimezone(pytz.UTC)
+            return NormalizedTimestamp(
+                utc_datetime=utc_dt,
+                source_tz=source_tz,
+                milliseconds=utc_dt.microsecond // 1000,
+                is_dst_adjusted=False,
+            )
+
+        # ── Step 1: Try the main strptime format chain ────────────────────
         parsed_dt: datetime | None = None
         for fmt in _FORMAT_CHAIN:
             try:
@@ -149,6 +245,12 @@ class TimestampNormalizer:
         if parsed_dt is None:
             parsed_dt = _parse_syslog_ts(cleaned)
 
+        # ── Step 1c: Last resort — let pandas try (R2 "use pandas") ───────
+        # Catches naive formats not in _FORMAT_CHAIN (e.g. "2026-03-25
+        # 03:24" without seconds, or locale variants) before giving up.
+        if parsed_dt is None:
+            parsed_dt = _try_pandas_naive(cleaned)
+
         if parsed_dt is None:
             raise TimestampParseError(raw_ts=raw_ts, source_label=source_tz)
 
@@ -156,14 +258,16 @@ class TimestampNormalizer:
         milliseconds = parsed_dt.microsecond // 1000
 
         # ── Step 3: Attach the source timezone ────────────────────────────
+        # localize() correctly resolves the DST offset for the DST-observing
+        # Australian zones now in SUPPORTED_TIMEZONES; is_dst=False (pytz
+        # default) is a safe deterministic choice for the rare ambiguous
+        # fall-back hour in forensic logs.
         tz_obj = pytz.timezone(source_tz)
         localised_dt = tz_obj.localize(parsed_dt)
 
         # ── Step 4: Convert to UTC ────────────────────────────────────────
         utc_dt = localised_dt.astimezone(pytz.UTC)
 
-        # Perth, Singapore, and Dubai do not observe DST, so this is always
-        # False for the prototype's supported timezone set.
         is_dst_adjusted = bool(localised_dt.dst())
 
         return NormalizedTimestamp(

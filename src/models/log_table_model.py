@@ -22,6 +22,15 @@ COLOR_DEFAULT_TEXT = QColor("#8090b0")    # secondary text
 COLOR_HIGHLIGHTED_TEXT = QColor("#c8e89a")
 COLOR_SELECTED_TEXT = QColor("#c0e4f8")
 
+# R5 — flag/pin markers. A row flagged by the investigator IN THIS file gets a
+# solid amber background; the same moment in every OTHER open file gets a
+# subtler tint (the nearest row by timestamp) so a flagged event is traceable
+# across all logs at once.
+COLOR_FLAG_BG = QColor("#3a2e0a")          # row flagged in this file
+COLOR_CROSS_MARKER_BG = QColor("#241f10")  # nearest row to a flag in another file
+FLAG_GLYPH = "⚑"          # ⚑ — this file's own flag
+CROSS_MARKER_GLYPH = "◆"  # ◆ — a flag propagated from another file
+
 STATUS_COLORS = {
     "Success": QColor("#57cc99"),
     "Failure": QColor("#e06060"),
@@ -44,6 +53,13 @@ class LogTableModel(QAbstractTableModel):
         self._matched_indices: set[int] = set()
         self._selected_row: int | None = None
 
+        # R5 — rows the investigator has flagged in THIS file.
+        self._flagged_rows: set[int] = set()
+        # R5 — rows that are the closest match (by timestamp) to a flag set in
+        # ANOTHER file. Maps row_index -> origin source color hex, so the
+        # marker glyph/tint can hint which file the flag came from.
+        self._cross_markers: dict[int, str] = {}
+
         # The timezone the TIMESTAMP column is currently rendered in. This
         # is intentionally separate from each entry's normalized_timestamp
         # (always stored internally as UTC) and from SOURCE_TIMEZONE_
@@ -51,7 +67,9 @@ class LogTableModel(QAbstractTableModel):
         # to be AUTHORED in, used only at parse time). This is the
         # investigator-facing DISPLAY timezone — what TopNavBar's dropdown
         # should actually control, separate from the parsing assumption.
-        self._display_tz = "Asia/Dubai"
+        # Defaults to Perth (the app-wide default, R2/R3); MainWindow sets the
+        # real selection on every panel as soon as it's created.
+        self._display_tz = "Australia/Perth"
 
     # -- Qt required overrides -------------------------------------------------
 
@@ -77,7 +95,15 @@ class LogTableModel(QAbstractTableModel):
 
         if role == Qt.DisplayRole:
             if column_key == "timestamp":
-                return self.format_timestamp(entry)
+                # Prefix the timestamp with a flag/marker glyph so a flagged
+                # moment is spottable even when the row background is subtle
+                # (R5). Own flag takes precedence over a cross-file marker.
+                ts_text = self.format_timestamp(entry)
+                if index.row() in self._flagged_rows:
+                    return f"{FLAG_GLYPH} {ts_text}"
+                if index.row() in self._cross_markers:
+                    return f"{CROSS_MARKER_GLYPH} {ts_text}"
+                return ts_text
 
             # entry.fields is the raw dict mapped by LogParser._map_fields()
             # — every other column displays straight from it since only
@@ -85,13 +111,26 @@ class LogTableModel(QAbstractTableModel):
             return str(entry.fields.get(column_key, ""))
 
         if role == Qt.BackgroundRole:
+            # Flags sit ABOVE selection/highlight so a flagged row stays
+            # visually distinct regardless of the current filter or selection.
+            if index.row() in self._flagged_rows:
+                return COLOR_FLAG_BG
             if index.row() == self._selected_row:
                 return COLOR_SELECTED_BG
             if index.row() in self._matched_indices:
                 return COLOR_HIGHLIGHTED_BG
+            if index.row() in self._cross_markers:
+                return COLOR_CROSS_MARKER_BG
             return None
 
         if role == Qt.ForegroundRole:
+            # Colour the flag/marker glyph (timestamp column) so a cross-file
+            # marker visibly carries its origin file's colour (R5).
+            if column_key == "timestamp":
+                if index.row() in self._flagged_rows:
+                    return QColor("#ffd60a")
+                if index.row() in self._cross_markers:
+                    return QColor(self._cross_markers[index.row()])
             if column_key == "status":
                 status_value = entry.fields.get("status", "")
                 if status_value in STATUS_COLORS:
@@ -130,7 +169,7 @@ class LogTableModel(QAbstractTableModel):
         try:
             tz_obj = pytz.timezone(self._display_tz)
         except pytz.UnknownTimeZoneError:
-            tz_obj = pytz.timezone("Asia/Dubai")
+            tz_obj = pytz.timezone("Australia/Perth")
 
         local_dt = entry.normalized_timestamp.utc_datetime.astimezone(tz_obj)
         ms = entry.normalized_timestamp.milliseconds
@@ -158,6 +197,8 @@ class LogTableModel(QAbstractTableModel):
         self._entries = entries
         self._matched_indices.clear()
         self._selected_row = None
+        self._flagged_rows.clear()
+        self._cross_markers.clear()
         self.endResetModel()
 
     def highlight_matched(self, matched_row_indices: list[int]) -> None:
@@ -170,6 +211,47 @@ class LogTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._matched_indices = set(matched_row_indices)
         self.endResetModel()
+
+    # -- R5 flags / cross-file markers -----------------------------------------
+
+    def toggle_flag(self, row: int) -> bool:
+        """Flag or unflag a row in THIS file. Returns the new flagged state
+        (True = now flagged). A full repaint keeps it simple — flag changes
+        are rare, investigator-driven events, not hot-path updates.
+        """
+        if not (0 <= row < len(self._entries)):
+            return False
+        if row in self._flagged_rows:
+            self._flagged_rows.discard(row)
+            now_flagged = False
+        else:
+            self._flagged_rows.add(row)
+            now_flagged = True
+        self._repaint_all()
+        return now_flagged
+
+    def is_flagged(self, row: int) -> bool:
+        return row in self._flagged_rows
+
+    def flagged_entries(self) -> list[RawLogEntry]:
+        """Returns the RawLogEntry objects flagged in this file, used by
+        MainWindow to broadcast their timestamps to every other panel.
+        """
+        return [self._entries[r] for r in sorted(self._flagged_rows)
+                if 0 <= r < len(self._entries)]
+
+    def set_cross_markers(self, markers: dict[int, str]) -> None:
+        """Replaces the set of cross-file markers (row_index -> origin color).
+        Called by MainWindow whenever a flag is added/removed in ANOTHER file.
+        """
+        self._cross_markers = dict(markers)
+        self._repaint_all()
+
+    def _repaint_all(self) -> None:
+        if self._entries:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right)
 
     def set_selected_row(self, row: int | None) -> None:
         """Mark a single row as selected — populates the EventDetailPanel."""
