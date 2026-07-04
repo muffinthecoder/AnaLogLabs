@@ -284,3 +284,25 @@ class TimestampNormalizer:
         """
         source_tz = get_timezone_for_source(source_label)
         return TimestampNormalizer.normalize_timestamp(raw_ts, source_tz)
+
+    @staticmethod
+    def renormalize_entries(entries: list, source_tz: str) -> list:
+        """Re-derives every entry's UTC value by re-parsing its ORIGINAL raw
+        timestamp under a new source timezone (Section 2.1 — changing the
+        "Original timezone" control).
+
+        RawLogEntry is frozen, so this returns a NEW list of entries with
+        refreshed normalized_timestamp. Rows whose raw timestamp carried an
+        explicit offset are unaffected (auto-detection ignores source_tz for
+        them); rows that now fail to parse get normalized_timestamp=None.
+        """
+        from dataclasses import replace
+
+        out = []
+        for entry in entries:
+            try:
+                nts = TimestampNormalizer.normalize_timestamp(entry.raw_timestamp, source_tz)
+            except TimestampParseError:
+                nts = None
+            out.append(replace(entry, normalized_timestamp=nts))
+        return out

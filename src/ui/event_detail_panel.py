@@ -120,13 +120,8 @@ class EventDetailPanel(QWidget):
         outer.addWidget(body, stretch=1)
 
     def show_event(self, entry: RawLogEntry, correlation_count: int = 0) -> None:
-        """Populate the panel from a clicked RawLogEntry.
-
-        TODO (Hiba/Fatima):
-            entry.fields keys are placeholders pending the real field mapper
-            (Section 4.7.1 step 3 _map_fields). Update .get() keys below to
-            match the canonical field names once finalised.
-        """
+        """Populate the panel from a clicked RawLogEntry. Field keys below are
+        the canonical names produced by LogParser._map_fields()."""
         self._last_entry = entry
         self._last_correlation = correlation_count
 

@@ -1,23 +1,21 @@
 """
-activity_heatmap.py — R6 activity/frequency HEAT MAP.
+activity_heatmap.py — R6 / Section 5.1 activity heat map.
 
-Complements the existing ActivityFrequencyChart (grouped bars) with a compact
-heat map that makes "busy periods across files" pop at a glance: one row per
-log source, one column per time bucket, cell colour intensity proportional to
-how many events that source logged in that bucket. The busiest cell in the
-whole session anchors full intensity, so a genuine spike in any file stands out
-against quiet periods.
+Grid: X-axis = time of day (0:00 → 24:00), Y-axis = log source (one row per
+imported file). Every event is bucketed by its time-of-day (in the current
+DISPLAY timezone), aggregated across the FULL imported range — this view is
+deliberately independent of any investigation-window filter (Section 5.1).
 
-Implemented with a plain QPainter (rather than PyQtGraph) so it has no extra
-dependency and always renders inside the fixed-width right dashboard.
+Each file has ONE fixed hue (from the shared SourceColorMap). Within a file's
+row, cell intensity encodes frequency — busier buckets render at full hue,
+quiet buckets fade toward the background — normalised PER FILE so each source's
+own busy periods are visible regardless of how its volume compares to others.
+Hue never changes with frequency, only intensity (Section 5.1).
 
-Data flow mirrors ActivityFrequencyChart so InvestigationDashboard can drive
-both from the same call sites:
-    InvestigationDashboard.load_entries() -> set_entries()
-    MainWindow._on_timezone_changed()     -> set_display_timezone()
+Pure QPainter (no PyQtGraph dependency) so it always renders.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytz
 from PySide6.QtCore import Qt, QRectF
@@ -26,23 +24,21 @@ from PySide6.QtWidgets import QWidget
 
 from src.models.data_classes import RawLogEntry
 
-# Number of time buckets across the loaded range — matches the bar chart's
-# default so the two visualisations line up conceptually.
-DEFAULT_BUCKET_COUNT = 24
+# 48 half-hour buckets across the day give a readable "busy period" resolution.
+BUCKETS_PER_DAY = 48
+MINUTES_PER_BUCKET = 24 * 60 // BUCKETS_PER_DAY  # 30
 
-# Cell intensity floor/ceiling (alpha). Even a single event shows faintly so an
-# occupied bucket is never invisible; the busiest bucket hits full alpha.
-MIN_ALPHA = 45
-MAX_ALPHA = 235
+MIN_ALPHA = 30
+MAX_ALPHA = 245
 
-ROW_HEIGHT = 16          # px per source row
-LABEL_GUTTER = 8         # left px reserved for the source colour dot
-AXIS_HEIGHT = 14         # bottom px reserved for time labels
-TOP_PAD = 2
+ROW_HEIGHT = 22
+LABEL_GUTTER = 96   # left area: colour dot + file name
+AXIS_HEIGHT = 16
+TOP_PAD = 4
 
 
 class ActivityHeatmap(QWidget):
-    """R6 — per-source time-bucketed activity heat map."""
+    """Time-of-day × file activity heat map (Section 5.1)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,9 +46,9 @@ class ActivityHeatmap(QWidget):
         self._colors: dict[str, str] = {}
         self._display_tz = "Australia/Perth"
         self.setMinimumHeight(ROW_HEIGHT + AXIS_HEIGHT + TOP_PAD)
-        self.setToolTip("Activity heat map — darker cells = busier periods")
+        self.setToolTip("Activity by time of day — brighter = busier (per file)")
 
-    # -- Public API (mirrors ActivityFrequencyChart) ---------------------------
+    # -- Public API ------------------------------------------------------------
 
     def set_entries(self, entries_by_source: dict[str, list[RawLogEntry]], colors: dict[str, str]) -> None:
         self._entries_by_source = entries_by_source
@@ -80,105 +76,95 @@ class ActivityHeatmap(QWidget):
 
     def _resize_for_sources(self) -> None:
         rows = max(len(self._valid_sources()), 1)
-        self.setFixedHeight(TOP_PAD + rows * ROW_HEIGHT + AXIS_HEIGHT)
+        self.setMinimumHeight(TOP_PAD + rows * ROW_HEIGHT + AXIS_HEIGHT)
 
-    def _time_range(self, sources: list[str]) -> tuple[datetime, datetime]:
-        all_ts = [
-            e.normalized_timestamp.utc_datetime
-            for label in sources
-            for e in self._entries_by_source[label]
-            if e.normalized_timestamp is not None
-        ]
-        start, end = min(all_ts), max(all_ts)
-        if end <= start:
-            end = start + timedelta(seconds=1)
-        return start, end
+    def _tz(self):
+        try:
+            return pytz.timezone(self._display_tz)
+        except pytz.UnknownTimeZoneError:
+            return pytz.timezone("Australia/Perth")
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, False)
 
-        sources = self._valid_sources()
+        sources = sorted(self._valid_sources())
         if not sources:
             painter.setPen(QColor("#4a5a7a"))
             painter.drawText(self.rect(), Qt.AlignCenter, "No log data loaded")
             painter.end()
             return
 
-        sources = sorted(sources)
-        range_start, range_end = self._time_range(sources)
-        span_seconds = (range_end - range_start).total_seconds()
-        bucket_seconds = span_seconds / DEFAULT_BUCKET_COUNT
+        tz = self._tz()
 
-        # First pass — bucket every source and find the global max so intensity
-        # is comparable across files ("busiest bucket anywhere" = full alpha).
+        # Bucket each source by time-of-day, tracking each row's own max.
         counts_by_source: dict[str, list[int]] = {}
-        global_max = 1
+        row_max: dict[str, int] = {}
         for label in sources:
-            buckets = [0] * DEFAULT_BUCKET_COUNT
+            buckets = [0] * BUCKETS_PER_DAY
             for entry in self._entries_by_source[label]:
                 if entry.normalized_timestamp is None:
                     continue
-                ts = entry.normalized_timestamp.utc_datetime
-                idx = int((ts - range_start).total_seconds() // bucket_seconds)
-                idx = min(idx, DEFAULT_BUCKET_COUNT - 1)
+                local = entry.normalized_timestamp.utc_datetime.astimezone(tz)
+                minute_of_day = local.hour * 60 + local.minute
+                idx = min(minute_of_day // MINUTES_PER_BUCKET, BUCKETS_PER_DAY - 1)
                 buckets[idx] += 1
             counts_by_source[label] = buckets
-            global_max = max(global_max, max(buckets))
+            row_max[label] = max(1, max(buckets))
 
-        # Geometry.
         grid_left = LABEL_GUTTER
-        grid_width = max(self.width() - grid_left - 2, 1)
-        cell_width = grid_width / DEFAULT_BUCKET_COUNT
+        grid_width = max(self.width() - grid_left - 4, 1)
+        cell_width = grid_width / BUCKETS_PER_DAY
 
-        # Second pass — draw the colour dot + cells for each source row.
+        painter.setFont(self._small_font())
         for row, label in enumerate(sources):
             y = TOP_PAD + row * ROW_HEIGHT
             base = QColor(self._colors.get(label, "#4A90D9"))
 
-            # Source colour dot in the left gutter.
+            # Left gutter — colour dot + (truncated) file name.
             painter.setPen(Qt.NoPen)
             painter.setBrush(base)
-            painter.drawEllipse(QRectF(0, y + ROW_HEIGHT / 2 - 3, 6, 6))
+            painter.drawEllipse(QRectF(4, y + ROW_HEIGHT / 2 - 3, 6, 6))
+            painter.setPen(QColor("#8090b0"))
+            painter.drawText(
+                QRectF(16, y, grid_left - 18, ROW_HEIGHT),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                self._elide(label, 12),
+            )
 
+            rmax = row_max[label]
             for b, count in enumerate(counts_by_source[label]):
-                cell = QRectF(
-                    grid_left + b * cell_width, y + 1,
-                    cell_width - 1, ROW_HEIGHT - 2,
-                )
+                cell = QRectF(grid_left + b * cell_width, y + 1, cell_width - 0.5, ROW_HEIGHT - 2)
                 if count == 0:
-                    painter.setBrush(QColor("#12182a"))  # faint empty cell
+                    painter.setBrush(QColor("#12182a"))
                 else:
-                    alpha = MIN_ALPHA + int((MAX_ALPHA - MIN_ALPHA) * (count / global_max))
+                    alpha = MIN_ALPHA + int((MAX_ALPHA - MIN_ALPHA) * (count / rmax))
                     fill = QColor(base)
                     fill.setAlpha(alpha)
                     painter.setBrush(fill)
+                painter.setPen(Qt.NoPen)
                 painter.drawRect(cell)
 
-        # Bottom axis — start / midpoint / end in the display timezone.
-        try:
-            tz = pytz.timezone(self._display_tz)
-        except pytz.UnknownTimeZoneError:
-            tz = pytz.timezone("Australia/Perth")
-        mid = range_start + (range_end - range_start) / 2
-        axis_y = self.height() - AXIS_HEIGHT + 2
+        # Bottom axis: 0:00 / 6:00 / 12:00 / 18:00 / 24:00.
+        axis_y = TOP_PAD + len(sources) * ROW_HEIGHT
         painter.setPen(QColor("#4a5a7a"))
-        font = QFont()
-        font.setPixelSize(8)
-        painter.setFont(font)
-        painter.drawText(
-            QRectF(grid_left, axis_y, grid_width / 3, AXIS_HEIGHT),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            range_start.astimezone(tz).strftime("%H:%M"),
-        )
-        painter.drawText(
-            QRectF(grid_left + grid_width / 3, axis_y, grid_width / 3, AXIS_HEIGHT),
-            Qt.AlignCenter,
-            mid.astimezone(tz).strftime("%H:%M"),
-        )
-        painter.drawText(
-            QRectF(grid_left + 2 * grid_width / 3, axis_y, grid_width / 3, AXIS_HEIGHT),
-            Qt.AlignRight | Qt.AlignVCenter,
-            range_end.astimezone(tz).strftime("%H:%M"),
-        )
+        for hour in (0, 6, 12, 18, 24):
+            x = grid_left + (hour / 24.0) * grid_width
+            align = Qt.AlignHCenter
+            rect = QRectF(x - 20, axis_y, 40, AXIS_HEIGHT)
+            if hour == 0:
+                rect = QRectF(grid_left, axis_y, 40, AXIS_HEIGHT); align = Qt.AlignLeft
+            elif hour == 24:
+                rect = QRectF(grid_left + grid_width - 40, axis_y, 40, AXIS_HEIGHT); align = Qt.AlignRight
+            painter.drawText(rect, align | Qt.AlignVCenter, f"{hour}:00")
         painter.end()
+
+    @staticmethod
+    def _small_font() -> QFont:
+        f = QFont()
+        f.setPixelSize(9)
+        return f
+
+    @staticmethod
+    def _elide(text: str, max_chars: int) -> str:
+        return text if len(text) <= max_chars else text[: max_chars - 1] + "…"

@@ -29,6 +29,7 @@ from datetime import datetime
 # human-readable labels shown in the UI, including the UTC offset range (R3
 # "add offset time range").
 SUPPORTED_TIMEZONES = {
+    "UTC":                 "UTC (UTC+0)",
     "Australia/Perth":     "Perth (AWST, UTC+8)",
     "Australia/Adelaide":  "Adelaide (ACST/ACDT, UTC+9:30/+10:30)",
     "Australia/Darwin":    "Darwin (ACST, UTC+9:30)",
@@ -51,14 +52,38 @@ SOURCE_TIMEZONE_ASSIGNMENTS: dict[str, str] = {}
 # primary operating timezone.
 DEFAULT_TIMEZONE = "Australia/Perth"
 
+# The currently-selected GLOBAL original/source timezone — what the top bar's
+# "Original timezone" control sets (Section 2.1). Starts at Perth; the
+# investigator can change it, which re-parses every loaded row's raw timestamp
+# against the new zone. Kept separate from the immutable DEFAULT_TIMEZONE so a
+# reset is always possible.
+_CURRENT_DEFAULT_SOURCE_TZ = DEFAULT_TIMEZONE
+
+
+def set_default_source_timezone(iana_timezone: str) -> None:
+    """Sets the global original/source timezone applied to files that don't
+    have an explicit per-file override (Section 2.1).
+    """
+    if iana_timezone not in SUPPORTED_TIMEZONES:
+        raise ValueError(
+            f"Unsupported timezone '{iana_timezone}'. "
+            f"Must be one of: {list(SUPPORTED_TIMEZONES.keys())}"
+        )
+    global _CURRENT_DEFAULT_SOURCE_TZ
+    _CURRENT_DEFAULT_SOURCE_TZ = iana_timezone
+
+
+def get_default_source_timezone() -> str:
+    return _CURRENT_DEFAULT_SOURCE_TZ
+
 
 def get_timezone_for_source(source_label: str) -> str:
     """Returns the IANA source timezone assigned to a given log source.
 
-    Falls back to DEFAULT_TIMEZONE (Perth) if the investigator has not
-    explicitly assigned one.
+    Falls back to the current global original timezone (Perth unless changed)
+    if the investigator has not set a per-file override.
     """
-    return SOURCE_TIMEZONE_ASSIGNMENTS.get(source_label, DEFAULT_TIMEZONE)
+    return SOURCE_TIMEZONE_ASSIGNMENTS.get(source_label, _CURRENT_DEFAULT_SOURCE_TZ)
 
 
 def set_timezone_for_source(source_label: str, iana_timezone: str) -> None:

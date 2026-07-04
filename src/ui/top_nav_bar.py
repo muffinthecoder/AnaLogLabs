@@ -1,17 +1,17 @@
 """
-TopNavBar — fixed top navigation bar (Section 6.3.4 Zone 1).
+TopNavBar — fixed top bar.
 
-Controls (per design doc table, extended for the MVP changes):
-    AnaLog Labs logo  — static label, branding only
-    Import logs       — primary button, opens native OS file dialog
-    Sync scroll        — toggle button (timestamp-aligned scrolling)
-    Lock windows       — toggle button (R7): docks all panels side-by-side
-                         into one puzzle-locked view with a single unified
-                         scrollbar
-    Display timezone   — dropdown: Australian cities + Dubai + Singapore (R3)
-    Session status      — status indicator (logs loaded count + active dot)
-
-Owned by: Fatima
+Controls, left to right:
+    AnaLog Labs logo
+    Import logs
+    Sync scroll toggle   — pressable; if pressed with no time range set, the
+                           user is prompted to enter one (handled in MainWindow).
+    Convert to           — ONE display-timezone dropdown (UTC, Perth, the other
+                           Australian cities, Dubai, Singapore). There is no
+                           separate "original" timezone control: raw timestamps
+                           ending in "Z" are treated as UTC and all others as
+                           Perth local time, automatically.
+    Session stats        — Total / Highlighted / Flagged, live-updated.
 """
 
 from PySide6.QtCore import Signal
@@ -21,16 +21,11 @@ from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, DEFAULT_TIMEZONE
 
 
 class TopNavBar(QWidget):
-    """Section 6.3.4 Zone 1 — top navigation bar."""
+    """Top bar."""
 
     import_logs_clicked = Signal()
     sync_scroll_toggled = Signal(bool)
-    lock_windows_toggled = Signal(bool)
-    # Emits the IANA timezone name (e.g. "Australia/Perth"), not the display
-    # label — so downstream code never has to reverse-map a label back to a
-    # zone. This is the DISPLAY timezone only (R3); it does not change how
-    # imported logs are parsed (that assumption is Perth, see timezone_map).
-    timezone_changed = Signal(str)
+    display_timezone_changed = Signal(str)   # IANA name — the "convert to" zone
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,47 +47,41 @@ class TopNavBar(QWidget):
         self.import_button.clicked.connect(self.import_logs_clicked.emit)
         layout.addWidget(self.import_button)
 
+        # Sync scroll starts OFF but is always pressable: pressing it without a
+        # valid time range prompts the user (handled in MainWindow) rather than
+        # being silently disabled.
         self.sync_scroll_button = QPushButton("Sync scroll")
         self.sync_scroll_button.setCheckable(True)
         self.sync_scroll_button.toggled.connect(self._on_sync_toggled)
         layout.addWidget(self.sync_scroll_button)
 
-        # R7 — puzzle-lock all open panels into one unified, single-scrollbar
-        # view. Kept separate from Sync scroll so investigators can still use
-        # timestamp-aligned scrolling with free-floating windows if they
-        # prefer; Lock windows is the "snap everything together" mode.
-        self.lock_windows_button = QPushButton("Lock windows")
-        self.lock_windows_button.setCheckable(True)
-        self.lock_windows_button.toggled.connect(self._on_lock_toggled)
-        layout.addWidget(self.lock_windows_button)
-
         self._add_separator(layout)
 
-        tz_label = QLabel("Display TZ")
-        tz_label.setStyleSheet("font-size: 11px; color: #5a6a8a;")
-        layout.addWidget(tz_label)
-
-        self.timezone_dropdown = QComboBox()
-        # Store the IANA name as the item's userData so currentData() gives us
-        # the zone directly, while the visible text stays the friendly label.
+        # ONE display-timezone dropdown ("convert to"). Raw "Z" timestamps are
+        # UTC and non-"Z" timestamps are Perth local — that assumption is fixed
+        # in the parser, so there is no separate "original timezone" control.
+        layout.addWidget(self._tz_caption("Convert to"))
+        self.display_tz_dropdown = QComboBox()
         for iana, label in SUPPORTED_TIMEZONES.items():
-            self.timezone_dropdown.addItem(label, iana)
-        default_index = self.timezone_dropdown.findData(DEFAULT_TIMEZONE)
-        if default_index >= 0:
-            self.timezone_dropdown.setCurrentIndex(default_index)
-        self.timezone_dropdown.currentIndexChanged.connect(self._on_timezone_index_changed)
-        layout.addWidget(self.timezone_dropdown)
+            self.display_tz_dropdown.addItem(label, iana)
+        # Default display = Perth (the client's primary zone; matches the "+8"
+        # converted times seen in the reference screenshot).
+        self._select(self.display_tz_dropdown, DEFAULT_TIMEZONE)
+        self.display_tz_dropdown.currentIndexChanged.connect(
+            lambda _i: self.display_timezone_changed.emit(self.display_tz_dropdown.currentData())
+        )
+        layout.addWidget(self.display_tz_dropdown)
 
         layout.addStretch()
 
-        self.status_dot = QLabel()
-        self.status_dot.setFixedSize(7, 7)
-        self.status_dot.setStyleSheet("background-color: #57cc99; border-radius: 4px;")
-        layout.addWidget(self.status_dot)
+        # Live session stats.
+        self.total_label = self._stat_label("Total", "0", "#00c4e8")
+        self.highlighted_label = self._stat_label("Highlighted", "0", "#ffd60a")
+        self.flagged_label = self._stat_label("Flagged", "0", "#e8b840")
+        for w in (self.total_label, self.highlighted_label, self.flagged_label):
+            layout.addWidget(w)
 
-        self.status_label = QLabel("0 logs loaded")
-        self.status_label.setStyleSheet("font-size: 11px; color: #57cc99;")
-        layout.addWidget(self.status_label)
+    # -- construction helpers --------------------------------------------------
 
     def _add_separator(self, layout: QHBoxLayout) -> None:
         sep = QFrame()
@@ -101,41 +90,54 @@ class TopNavBar(QWidget):
         sep.setStyleSheet("background-color: #2a3050;")
         layout.addWidget(sep)
 
+    def _tz_caption(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 10px; color: #5a6a8a;")
+        return label
+
+    def _stat_label(self, caption: str, value: str, color: str) -> QLabel:
+        label = QLabel()
+        label.setProperty("caption", caption)
+        label.setProperty("color", color)
+        label.setStyleSheet("font-size: 11px; color: #8090b0;")
+        self._render_stat(label, value)
+        return label
+
+    def _render_stat(self, label: QLabel, value: str) -> None:
+        caption = label.property("caption")
+        color = label.property("color")
+        label.setText(
+            f"<span style='color:#5a6a8a'>{caption}</span> "
+            f"<span style='color:{color}; font-weight:600'>{value}</span>"
+        )
+
+    @staticmethod
+    def _select(combo: QComboBox, iana: str) -> None:
+        idx = combo.findData(iana)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
     def _on_sync_toggled(self, checked: bool) -> None:
         self.sync_scroll_button.setObjectName("ToggleActive" if checked else "")
         self.sync_scroll_button.setStyleSheet("")  # force re-polish
         self.sync_scroll_toggled.emit(checked)
 
-    def _on_lock_toggled(self, checked: bool) -> None:
-        self.lock_windows_button.setObjectName("ToggleActive" if checked else "")
-        self.lock_windows_button.setStyleSheet("")  # force re-polish
-        self.lock_windows_button.setText("Unlock windows" if checked else "Lock windows")
-        self.lock_windows_toggled.emit(checked)
+    # -- public API ------------------------------------------------------------
 
-    def _on_timezone_index_changed(self, _index: int) -> None:
-        iana = self.timezone_dropdown.currentData()
-        if iana:
-            self.timezone_changed.emit(iana)
+    def current_display_timezone(self) -> str:
+        return self.display_tz_dropdown.currentData() or DEFAULT_TIMEZONE
 
-    def current_timezone(self) -> str:
-        """Returns the currently selected DISPLAY timezone (IANA name)."""
-        return self.timezone_dropdown.currentData() or DEFAULT_TIMEZONE
-
-    def set_loaded_count(self, count: int) -> None:
-        self.status_label.setText(f"{count} log{'s' if count != 1 else ''} loaded")
-
-    def set_sync_scroll_enabled(self, enabled: bool) -> None:
-        """Disable the sync-scroll toggle (with a tooltip) when fewer than 2
-        panels are open — sync only means something across multiple logs.
+    def force_sync_off(self) -> None:
+        """Reset the sync toggle to OFF without emitting toggled — used after
+        the "please enter a time range" prompt to undo the user's press.
         """
-        self.sync_scroll_button.setEnabled(enabled)
-        self.sync_scroll_button.setToolTip(
-            "" if enabled else "Requires at least 2 log panels."
-        )
+        self.sync_scroll_button.blockSignals(True)
+        self.sync_scroll_button.setChecked(False)
+        self.sync_scroll_button.setObjectName("")
+        self.sync_scroll_button.setStyleSheet("")
+        self.sync_scroll_button.blockSignals(False)
 
-    def set_lock_windows_enabled(self, enabled: bool) -> None:
-        """Lock mode also needs at least 2 panels to be meaningful."""
-        self.lock_windows_button.setEnabled(enabled)
-        self.lock_windows_button.setToolTip(
-            "" if enabled else "Requires at least 2 log panels."
-        )
+    def set_stats(self, total: int, highlighted: int, flagged: int) -> None:
+        self._render_stat(self.total_label, f"{total:,}")
+        self._render_stat(self.highlighted_label, f"{highlighted:,}")
+        self._render_stat(self.flagged_label, f"{flagged:,}")

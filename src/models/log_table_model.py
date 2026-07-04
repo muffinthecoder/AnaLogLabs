@@ -7,6 +7,8 @@ model only needs its data source swapped — the view, sorting, and highlighting
 logic in LogWindowWidget do not need to change.
 """
 
+from datetime import datetime, timedelta
+
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 import pytz
@@ -22,14 +24,16 @@ COLOR_DEFAULT_TEXT = QColor("#8090b0")    # secondary text
 COLOR_HIGHLIGHTED_TEXT = QColor("#c8e89a")
 COLOR_SELECTED_TEXT = QColor("#c0e4f8")
 
-# R5 — flag/pin markers. A row flagged by the investigator IN THIS file gets a
-# solid amber background; the same moment in every OTHER open file gets a
-# subtler tint (the nearest row by timestamp) so a flagged event is traceable
-# across all logs at once.
-COLOR_FLAG_BG = QColor("#3a2e0a")          # row flagged in this file
-COLOR_CROSS_MARKER_BG = QColor("#241f10")  # nearest row to a flag in another file
-FLAG_GLYPH = "⚑"          # ⚑ — this file's own flag
-CROSS_MARKER_GLYPH = "◆"  # ◆ — a flag propagated from another file
+# R5 / Section 4.2 — flag markers. Flags live in SHARED app state as a list of
+# absolute-time "anchors"; a row is flagged if its true (UTC) time falls within
+# FLAG_WINDOW of any anchor. Because every file's model tests the same anchors,
+# a flag set in one window automatically shows on every correlated event across
+# all files (±30s), and always renders identically regardless of focus.
+COLOR_FLAG_BG = QColor("#3a2e0a")
+FLAG_GLYPH = "⚑"
+
+# ±30 seconds cross-file correlation window (Section 4.2 / 6).
+FLAG_WINDOW = timedelta(seconds=30)
 
 STATUS_COLORS = {
     "Success": QColor("#57cc99"),
@@ -53,12 +57,9 @@ class LogTableModel(QAbstractTableModel):
         self._matched_indices: set[int] = set()
         self._selected_row: int | None = None
 
-        # R5 — rows the investigator has flagged in THIS file.
-        self._flagged_rows: set[int] = set()
-        # R5 — rows that are the closest match (by timestamp) to a flag set in
-        # ANOTHER file. Maps row_index -> origin source color hex, so the
-        # marker glyph/tint can hint which file the flag came from.
-        self._cross_markers: dict[int, str] = {}
+        # Section 4.2 — shared flag anchors (absolute UTC datetimes). A row is
+        # flagged when its true time is within FLAG_WINDOW of any anchor.
+        self._flag_anchors: list[datetime] = []
 
         # The timezone the TIMESTAMP column is currently rendered in. This
         # is intentionally separate from each entry's normalized_timestamp
@@ -83,7 +84,12 @@ class LogTableModel(QAbstractTableModel):
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:
-            return self._columns[section].upper()
+            key = self._columns[section]
+            if key == "original_log_time":
+                return "ORIGINAL LOG TIME"
+            if key == "timestamp":
+                return "CONVERTED TIMESTAMP"
+            return key.upper()
         return str(section)
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
@@ -94,15 +100,18 @@ class LogTableModel(QAbstractTableModel):
         column_key = self._columns[index.column()]
 
         if role == Qt.DisplayRole:
+            if column_key == "original_log_time":
+                # The raw, unconverted timestamp exactly as it appeared in the
+                # source file (e.g. "2026-03-25T01:05:02Z").
+                return entry.raw_timestamp or str(entry.fields.get("timestamp", ""))
+
             if column_key == "timestamp":
-                # Prefix the timestamp with a flag/marker glyph so a flagged
-                # moment is spottable even when the row background is subtle
-                # (R5). Own flag takes precedence over a cross-file marker.
+                # The CONVERTED TIMESTAMP — rendered in the display timezone.
+                # Prefix with a flag glyph so a flagged moment is spottable
+                # even when the row background is subtle.
                 ts_text = self.format_timestamp(entry)
-                if index.row() in self._flagged_rows:
+                if self._is_flagged_row(index.row()):
                     return f"{FLAG_GLYPH} {ts_text}"
-                if index.row() in self._cross_markers:
-                    return f"{CROSS_MARKER_GLYPH} {ts_text}"
                 return ts_text
 
             # entry.fields is the raw dict mapped by LogParser._map_fields()
@@ -113,24 +122,18 @@ class LogTableModel(QAbstractTableModel):
         if role == Qt.BackgroundRole:
             # Flags sit ABOVE selection/highlight so a flagged row stays
             # visually distinct regardless of the current filter or selection.
-            if index.row() in self._flagged_rows:
+            if self._is_flagged_row(index.row()):
                 return COLOR_FLAG_BG
             if index.row() == self._selected_row:
                 return COLOR_SELECTED_BG
             if index.row() in self._matched_indices:
                 return COLOR_HIGHLIGHTED_BG
-            if index.row() in self._cross_markers:
-                return COLOR_CROSS_MARKER_BG
             return None
 
         if role == Qt.ForegroundRole:
-            # Colour the flag/marker glyph (timestamp column) so a cross-file
-            # marker visibly carries its origin file's colour (R5).
-            if column_key == "timestamp":
-                if index.row() in self._flagged_rows:
-                    return QColor("#ffd60a")
-                if index.row() in self._cross_markers:
-                    return QColor(self._cross_markers[index.row()])
+            # Highlight the flag glyph / timestamp of a flagged row.
+            if column_key == "timestamp" and self._is_flagged_row(index.row()):
+                return QColor("#ffd60a")
             if column_key == "status":
                 status_value = entry.fields.get("status", "")
                 if status_value in STATUS_COLORS:
@@ -175,6 +178,22 @@ class LogTableModel(QAbstractTableModel):
         ms = entry.normalized_timestamp.milliseconds
         return local_dt.strftime("%H:%M:%S") + f".{ms:03d}"
 
+    def full_display_datetime(self, entry: RawLogEntry) -> str:
+        """Full DATE + time of an entry in the display timezone, e.g.
+        "2026-03-25 09:05:02.000" — used when the investigator copies a row so
+        the pasted value carries a date (the CONVERTED TIMESTAMP column shows
+        time only) and drops straight into the time-range boxes.
+        """
+        if entry.normalized_timestamp is None:
+            return str(entry.fields.get("timestamp", ""))
+        try:
+            tz_obj = pytz.timezone(self._display_tz)
+        except pytz.UnknownTimeZoneError:
+            tz_obj = pytz.timezone("Australia/Perth")
+        local_dt = entry.normalized_timestamp.utc_datetime.astimezone(tz_obj)
+        ms = entry.normalized_timestamp.milliseconds
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms:03d}"
+
     # -- Public API used by LogWindowWidget -------------------------------------
 
     def set_display_timezone(self, tz_name: str) -> None:
@@ -197,55 +216,75 @@ class LogTableModel(QAbstractTableModel):
         self._entries = entries
         self._matched_indices.clear()
         self._selected_row = None
-        self._flagged_rows.clear()
-        self._cross_markers.clear()
+        # Flag anchors are shared app state (not per-load), so they are NOT
+        # cleared here — a reloaded/re-sorted file keeps showing flags for any
+        # of its events that still fall within the active ±30s windows.
         self.endResetModel()
 
     def highlight_matched(self, matched_row_indices: list[int]) -> None:
-        """Mark rows as within the active investigation window.
-
-        TODO (R5/R6 — Section 4.7.2 ApplyFilter step 4):
-            Called by LogFilter.apply_filter() results, routed through
-            LogWindowWidget.highlight_matched().
+        """Mark rows (by their CURRENT display position, not original file row
+        index) as within the active investigation window. Called from
+        MainWindow._apply_filter_highlighting with positions computed against
+        this model's current sort order. This ONLY highlights — it never flags.
         """
         self.beginResetModel()
         self._matched_indices = set(matched_row_indices)
         self.endResetModel()
 
-    # -- R5 flags / cross-file markers -----------------------------------------
+    # -- Section 4.2 flags (anchor-based, shared across files) ------------------
 
-    def toggle_flag(self, row: int) -> bool:
-        """Flag or unflag a row in THIS file. Returns the new flagged state
-        (True = now flagged). A full repaint keeps it simple — flag changes
-        are rare, investigator-driven events, not hot-path updates.
-        """
-        if not (0 <= row < len(self._entries)):
+    def _entry_time(self, entry: RawLogEntry) -> datetime | None:
+        nts = entry.normalized_timestamp
+        if nts is None:
+            return None
+        return nts.utc_datetime + timedelta(milliseconds=nts.milliseconds)
+
+    def _is_flagged_row(self, row: int) -> bool:
+        if not self._flag_anchors or not (0 <= row < len(self._entries)):
             return False
-        if row in self._flagged_rows:
-            self._flagged_rows.discard(row)
-            now_flagged = False
-        else:
-            self._flagged_rows.add(row)
-            now_flagged = True
-        self._repaint_all()
-        return now_flagged
+        t = self._entry_time(self._entries[row])
+        if t is None:
+            return False
+        return any(abs((t - a).total_seconds()) <= FLAG_WINDOW.total_seconds()
+                   for a in self._flag_anchors)
 
-    def is_flagged(self, row: int) -> bool:
-        return row in self._flagged_rows
-
-    def flagged_entries(self) -> list[RawLogEntry]:
-        """Returns the RawLogEntry objects flagged in this file, used by
-        MainWindow to broadcast their timestamps to every other panel.
+    def set_flag_anchors(self, anchors: list[datetime]) -> None:
+        """Replaces the shared set of flag anchors and repaints. Called by
+        MainWindow whenever any flag is added/removed anywhere.
         """
-        return [self._entries[r] for r in sorted(self._flagged_rows)
-                if 0 <= r < len(self._entries)]
-
-    def set_cross_markers(self, markers: dict[int, str]) -> None:
-        """Replaces the set of cross-file markers (row_index -> origin color).
-        Called by MainWindow whenever a flag is added/removed in ANOTHER file.
-        """
-        self._cross_markers = dict(markers)
+        self._flag_anchors = list(anchors)
         self._repaint_all()
+
+    def flagged_count(self) -> int:
+        """Number of THIS file's events that fall within ±30s of any anchor —
+        summed across all models by MainWindow for the Flagged stat."""
+        return sum(1 for r in range(len(self._entries)) if self._is_flagged_row(r))
+
+    def entry_time_for_row(self, row: int) -> datetime | None:
+        """Public access to a row's true (UTC, ms-inclusive) time — used by
+        MainWindow to add/remove flag anchors from a clicked row."""
+        if 0 <= row < len(self._entries):
+            return self._entry_time(self._entries[row])
+        return None
+
+    # -- Sorting (Section 3 / 4.3) ---------------------------------------------
+
+    def sort_by_time(self, descending: bool = False) -> None:
+        """Re-order rows into true chronological order (post-normalisation).
+        Unparseable rows (no normalized timestamp) always sort to the end,
+        regardless of direction. Flags follow the rows automatically since
+        they're keyed on absolute time, not row index.
+        """
+        valid = [e for e in self._entries if e.normalized_timestamp is not None]
+        invalid = [e for e in self._entries if e.normalized_timestamp is None]
+        valid.sort(key=lambda e: e.normalized_timestamp.utc_datetime, reverse=descending)
+
+        self.beginResetModel()
+        self._entries = valid + invalid
+        # Row-index-based selection/highlight no longer maps to the same entry.
+        self._selected_row = None
+        self._matched_indices.clear()
+        self.endResetModel()
 
     def _repaint_all(self) -> None:
         if self._entries:
