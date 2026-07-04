@@ -12,11 +12,11 @@ Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
 """
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView, QPushButton, QAbstractItemView,
+    QHeaderView, QPushButton, QAbstractItemView, QMenu,
 )
 
 from src.models.data_classes import RawLogEntry
@@ -58,6 +58,20 @@ class LogWindowWidget(QWidget):
         self.color_hex = color_hex
         self.scroll_position = 0
         self.matched_indices: list[int] = []
+
+        # Guard used by _do_scroll_to_first_match() (and could be reused
+        # anywhere else that scrolls this panel programmatically) to skip
+        # OUR OWN _on_scroll() handler during a code-driven scroll, without
+        # calling scrollbar.blockSignals(True). blockSignals(True) blocks
+        # every slot connected to valueChanged — not just _on_scroll — and
+        # Qt's own QAbstractItemView/QAbstractScrollArea internals are ALSO
+        # connected to that same signal to actually move the viewport's
+        # visible rows to match the scrollbar's value. Blocking it meant
+        # the scrollbar handle moved (it repaints itself from its own
+        # internal value regardless) while the rows on screen never did.
+        # A plain guard flag only short-circuits _on_scroll, leaving Qt's
+        # own scroll-the-viewport wiring untouched.
+        self._suppress_scroll_signal = False
 
         self._build_ui(columns)
 
@@ -200,6 +214,20 @@ class LogWindowWidget(QWidget):
 
         self.table_view.clicked.connect(self._on_row_clicked)
 
+        # Phase 2 — copy/paste timestamps. Ctrl+C is caught via an event
+        # filter (QTableView has no built-in copy action, and subclassing
+        # QTableView just for this would touch more than needed) rather
+        # than a QShortcut, since a QShortcut with no explicit context can
+        # fire even when this panel/table isn't the one focused — an event
+        # filter on the table_view itself only reacts when the table
+        # actually has focus, which is the correct scope for a per-panel
+        # row copy action.
+        self.table_view.installEventFilter(self)
+
+        # Right-click copy — same action, reachable without keyboard focus.
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_table_context_menu)
+
         # TODO (Section 4.7.3 SyncScroll):
         #   Connect verticalScrollBar().valueChanged to _on_scroll() so
         #   ScrollSyncManager can detect when this panel scrolls. Placeholder
@@ -259,7 +287,10 @@ class LogWindowWidget(QWidget):
         # generic floor (80px) since log_parser.py's _FIELD_NAME_ALIASES
         # covers many but not all possible source columns.
         column_min_widths = {
-            "timestamp": 160,
+            # Widened from 160 — format_timestamp() now renders a full
+            # "YYYY-MM-DD HH:MM:SS.mmm" date+time (Phase 2), not just
+            # "HH:MM:SS.mmm", so the old width clipped the date portion.
+            "timestamp": 210,
             "date": 160,
             "username": 130,
             "ip_address": 120,
@@ -279,15 +310,142 @@ class LogWindowWidget(QWidget):
 
         self._update_scroll_indicator(0)
 
-    def highlight_matched(self, matched_row_indices: list[int]) -> None:
-        """Called by LogFilter results (Section 4.7.2 step 4)."""
-        self.matched_indices = matched_row_indices
-        self.table_model.highlight_matched(matched_row_indices)
+    def highlight_matched(self, matched_entries: list[RawLogEntry]) -> None:
+        """Called by LogFilter results (Section 4.7.2 step 4).
+
+        Phase 5 — takes the matched RawLogEntry objects directly rather
+        than a list of row indices. `self.matched_indices` is kept as the
+        Section 4.6 class-diagram field (each entry's original file
+        row_index, for anything that wants to inspect "what's matched"
+        without caring about display order), but it is no longer what
+        LogTableModel uses to decide what to paint — that's tracked by
+        entry identity instead (see LogTableModel.highlight_matched), so
+        the highlight stays correct no matter what order the table is
+        currently sorted into.
+        """
+        self.matched_indices = [e.row_index for e in matched_entries]
+        self.table_model.highlight_matched(matched_entries)
+
+    def scroll_to_first_match(self) -> None:
+        """Auto-jumps this panel to its first (topmost, in current display
+        order) matched/highlighted row, if any — so an investigator doesn't
+        have to manually scroll and hunt after applying a filter. No-op if
+        nothing in this panel matched.
+
+        Called by MainWindow._on_filter_applied() right after
+        highlight_matched(), once every panel's matched state is already
+        up to date.
+
+        The actual scroll is deferred one event-loop tick via
+        QTimer.singleShot(0, ...) rather than run immediately. highlight_
+        matched() just called beginResetModel()/endResetModel(), and Qt
+        does NOT recompute a QTableView's row-position layout synchronously
+        on reset — it schedules that for the next paint pass. Calling
+        scrollTo() in the same call stack as the reset was asking it to
+        jump to a row position calculated from geometry that hadn't been
+        refreshed yet, so the jump either silently no-op'd or landed on the
+        wrong offset. Scheduling with singleShot(0, ...) runs this after
+        Qt's own pending layout pass has already happened.
+        """
+        QTimer.singleShot(0, self._do_scroll_to_first_match)
+
+    def _do_scroll_to_first_match(self) -> None:
+        """The actual scroll logic behind scroll_to_first_match(), run one
+        event-loop tick later — see that method's docstring for why.
+
+        Uses the _suppress_scroll_signal guard (see __init__) rather than
+        scrollbar.blockSignals(True) around scrollTo() — blockSignals was
+        also silencing Qt's own internal wiring that scrolls the
+        viewport's visible rows to match the scrollbar's new value, so the
+        scrollbar handle jumped but the table content on screen never did.
+        """
+        row = self.table_model.first_matched_row()
+        if row is None:
+            return
+
+        self._suppress_scroll_signal = True
+        try:
+            index = self.table_model.index(row, 0)
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
+        finally:
+            self._suppress_scroll_signal = False
+
+        self.scroll_position = self.table_view.verticalScrollBar().value()
+        self._update_scroll_indicator(row)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Catches Ctrl+C (or the platform's native copy shortcut) while
+        the table view has focus and routes it to _copy_selected_
+        timestamp() (Phase 2). Only intercepts the Copy key sequence —
+        every other key event is passed through untouched so normal
+        table navigation (arrows, Home/End, etc.) keeps working.
+        """
+        if obj is self.table_view and event.type() == QEvent.KeyPress:
+            if event.matches(QKeySequence.Copy):
+                self._copy_selected_timestamp()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _on_table_context_menu(self, pos) -> None:
+        """Right-click copy — the same action as Ctrl+C, but reachable
+        without keyboard focus or an existing selection. Right-clicking a
+        row selects it first (SingleSelection mode means this can't
+        conflict with a different existing selection) so "Copy timestamp"
+        always operates on the row that was actually right-clicked, not
+        whatever was selected beforehand.
+        """
+        index = self.table_view.indexAt(pos)
+        if not index.isValid():
+            return
+        self.table_view.selectRow(index.row())
+
+        menu = QMenu(self.table_view)
+        copy_action = menu.addAction("Copy timestamp")
+        copy_action.triggered.connect(self._copy_selected_timestamp)
+        menu.exec(self.table_view.viewport().mapToGlobal(pos))
+
+    def _copy_selected_timestamp(self) -> None:
+        """Copies the currently selected row's display-timezone-converted
+        TIMESTAMP value (not the raw "original_timestamp" column, and not
+        the whole row) to the system clipboard, so it can be pasted
+        straight into TimeFrameSelector's Start/End fields.
+
+        Only the timestamp column is copied — locked-in decision, since
+        copying the entire row (tab-separated across columns) wouldn't
+        paste cleanly into a single-line time field anyway, and all open
+        panels already share one display timezone so no per-row timezone
+        ambiguity exists to resolve.
+
+        Never touches matched/flagged state — copy/paste is a read-only
+        action with no side effects on highlighting or flagging.
+        """
+        selected_rows = self.table_view.selectionModel().selectedRows()
+        row = selected_rows[0].row() if selected_rows else self.table_view.currentIndex().row()
+        if row < 0:
+            return
+
+        entry = self.table_model.entry_at(row)
+        if entry is None:
+            return
+
+        QGuiApplication.clipboard().setText(self.table_model.format_timestamp(entry))
 
     def receive_sync_scroll(self, row_index: int) -> None:
         """Called by ScrollSyncManager — scrolls this panel to row_index
         WITHOUT emitting the scrolled signal, preventing recursive sync
         loops (Section 4.7.3 step 4).
+
+        Phase 8 fix: this used to guard against re-triggering sync with
+        `scrollbar.blockSignals(True)`. That blocks EVERY slot connected to
+        the scrollbar's valueChanged — including Qt's own internal
+        QAbstractItemView/QAbstractScrollArea wiring that actually moves
+        the visible rows to match the scrollbar's new value — so the
+        scrollbar handle jumped to the right place while the table content
+        on screen never did (the same bug already fixed in
+        _do_scroll_to_first_match). Now uses the same
+        `_suppress_scroll_signal` guard flag instead, which only
+        short-circuits our own `_on_scroll()` handler and leaves Qt's
+        internal scroll-the-viewport connection untouched.
         """
         if not self.table_model.rowCount():
             return
@@ -298,23 +456,25 @@ class LogWindowWidget(QWidget):
         # what actually guards against an out-of-range row_index.
         row_index = max(0, min(row_index, self.table_model.rowCount() - 1))
 
-        # Block the scroll signal so ScrollSyncManager doesn't pick this up
-        # as a new user-initiated scroll and trigger another sync round —
-        # the same recursion the docstring above warns about.
-        scrollbar = self.table_view.verticalScrollBar()
-        scrollbar.blockSignals(True)
+        self._suppress_scroll_signal = True
         try:
             index = self.table_model.index(row_index, 0)
-            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
-            self.scroll_position = scrollbar.value()
-            # _on_scroll() is what normally calls this, but it's skipped
-            # here since blockSignals(True) prevents it from firing — so
-            # the slider/timestamp label need updating directly, or they'd
-            # drift out of sync with the table every time another panel's
-            # scroll drives this one via ScrollSyncManager.
+            # Center-aligned rather than PositionAtTop — Phase 8 syncs
+            # panels off the timestamp visible at the CENTER of each
+            # viewport (see _on_scroll), so the row a sync moves TO should
+            # land at that same center point, not the top edge.
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            # _on_scroll() is what normally updates scroll_position/the
+            # indicator, but it's skipped here (via the guard flag above)
+            # since this is a programmatic, not user-driven, scroll. Store
+            # the actual row index landed on rather than the scrollbar's
+            # raw pixel value — every other place in this class treats
+            # scroll_position as a row index, and reading scrollbar.value()
+            # here was a latent inconsistency.
+            self.scroll_position = row_index
             self._update_scroll_indicator(row_index)
         finally:
-            scrollbar.blockSignals(False)
+            self._suppress_scroll_signal = False
 
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)
@@ -340,24 +500,41 @@ class LogWindowWidget(QWidget):
 
     def _on_scroll(self, value: int) -> None:
         """Fires on every vertical scrollbar movement (mouse wheel, drag,
-        or programmatic). `value` here is the scrollbar's own internal
-        unit (roughly "pixels scrolled", not a row index), so it has to be
-        converted via rowAt() before it means anything to LogTableModel or
-        ScrollSyncManager.
-        """
-        top_row = self.table_view.rowAt(0)
-        if top_row == -1:
-            # rowAt(0) returns -1 if no row currently occupies the very top
-            # pixel of the viewport (e.g. the table is empty, or — on some
-            # platforms — briefly during a resize/layout pass). Falling
-            # back to the last known good scroll_position avoids feeding a
-            # bogus -1 row index into ScrollSyncManager or the indicator
-            # below.
-            top_row = self.scroll_position
+        or programmatic).
 
-        self.scroll_position = top_row
-        self._update_scroll_indicator(top_row)
-        self.scrolled.emit(self.source_label, top_row)
+        Phase 8: the anchor row used for Sync Scroll is the row visible at
+        the CENTER of this panel's viewport, not the topmost row. Different
+        log sources have very different row heights-per-timestamp (one
+        source might have 40px of rows covering the same second another
+        covers in 2px), so anchoring on whichever entry happens to be
+        centered on screen keeps what the investigator is actually LOOKING
+        AT aligned across panels, rather than an edge row that may already
+        be scrolled past in a denser panel.
+        """
+        if self._suppress_scroll_signal:
+            # A code-driven scroll (e.g. _do_scroll_to_first_match or
+            # receive_sync_scroll) is already updating scroll_position/the
+            # indicator itself and deliberately doesn't want scrolled()
+            # emitted for this move — see the guard's docstring in __init__.
+            return
+
+        center_point = self.table_view.viewport().rect().center()
+        center_row = self.table_view.indexAt(center_point).row()
+        if center_row == -1:
+            # indexAt() returns an invalid index if no row currently
+            # occupies that pixel (e.g. the table is empty, fewer rows
+            # than fit a full viewport, or — on some platforms — briefly
+            # during a resize/layout pass). Fall back to the top row, then
+            # to the last known good scroll_position, rather than feeding
+            # a bogus -1 row index into ScrollSyncManager or the indicator
+            # below.
+            center_row = self.table_view.rowAt(0)
+        if center_row == -1:
+            center_row = self.scroll_position
+
+        self.scroll_position = center_row
+        self._update_scroll_indicator(center_row)
+        self.scrolled.emit(self.source_label, center_row)
 
     def _update_scroll_indicator(self, row: int) -> None:
         """Keeps the bottom "Scroll position" slider and timestamp label in

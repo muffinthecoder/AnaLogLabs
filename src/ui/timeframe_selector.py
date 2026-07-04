@@ -80,11 +80,20 @@ class TimeFrameSelector(QWidget):
     def _on_apply_clicked(self) -> None:
         """Section 4.7.2 ApplyFilter step 1 — validation before emitting.
 
+        Format accepted: "YYYY-MM-DD HH:MM:SS.mmm". This is intentionally
+        identical to the string LogWindowWidget's copy action puts on the
+        clipboard (LogTableModel.format_timestamp(), Phase 2) — a
+        timestamp copied from the log table pastes into either field
+        as-is, with no reformatting needed. If the two formats ever drift
+        apart (e.g. a future change to format_timestamp()), this parse
+        call is what needs updating to match.
+
         TODO (Fatima/Hiba):
             Replace the naive datetime.strptime calls below with the real
             parser that supports the format chain from Section 4.7.5
-            NormalizeTimestamp (ISO 8601, DD/MM/YYYY, MM-DD-YYYY, compact).
-            Currently only accepts "YYYY-MM-DD HH:MM:SS.mmm" exactly.
+            NormalizeTimestamp (ISO 8601, DD/MM/YYYY, MM-DD-YYYY, compact)
+            for manually-typed input — the exact-match parse here only
+            needs to keep working for pasted values in the meantime.
         """
         self.error_label.hide()
 

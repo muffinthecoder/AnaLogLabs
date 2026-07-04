@@ -14,12 +14,14 @@ Organised into three main areas per Section 5.2:
 """
 
 import sys
+import copy
+from datetime import timedelta
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFileDialog,
-    QMdiArea, QMdiSubWindow
+    QMdiArea, QMdiSubWindow, QMessageBox, QComboBox, QLabel
 )
 
 from src.ui.styles import MAIN_STYLESHEET
@@ -70,6 +72,24 @@ class MainWindow(QMainWindow):
         self._scroll_sync = ScrollSyncManager()
         self._sync_scroll_enabled: bool = False
 
+        # Phase 3 — Sync Scroll requires a valid, currently-applied time
+        # range. Holds the last FilterConfig successfully emitted by
+        # TimeFrameSelector.filter_applied, and is cleared back to None
+        # whenever filter_cleared fires — so this doubles as "is there a
+        # valid time range right now" without re-deriving that from the
+        # sidebar's raw text fields (which TimeFrameSelector already
+        # validated once at apply-time; re-validating here would just
+        # duplicate that logic).
+        self._active_filter_config: FilterConfig | None = None
+
+        # Phase 4 — one global sort direction applying to every open panel
+        # at once (TopNavBar's single dropdown, not per-panel). Stored here
+        # so a newly-imported panel (add_log_panel / _on_import_logs) can be
+        # brought into line with whatever order is already selected, rather
+        # than always defaulting to file/merge order until the investigator
+        # happens to re-touch the dropdown.
+        self._sort_ascending: bool = True
+
         self._build_ui()
         self._connect_signals()
 
@@ -109,6 +129,41 @@ class MainWindow(QMainWindow):
 
         self.tab_manager = TabManager()
         sidebar_layout.addWidget(self.tab_manager)
+
+        # Phase 4 — single global sort control, placed here in the left
+        # sidebar (under Log sources, above the time range) per request,
+        # rather than in TopNavBar. Still applies to every open panel at
+        # once, not per-panel — placement changed, scope didn't.
+        sort_row = QWidget()
+        sort_row_layout = QHBoxLayout(sort_row)
+        sort_row_layout.setContentsMargins(0, 0, 0, 0)
+        sort_row_layout.setSpacing(6)
+
+        sort_label = QLabel("Sort")
+        sort_label.setStyleSheet("font-size: 11px; color: #5a6a8a;")
+        sort_row_layout.addWidget(sort_label)
+
+        self.sort_dropdown = QComboBox()
+        # userData carries the bool the rest of the app actually cares
+        # about (ascending?) rather than making the handler parse
+        # "Oldest -> Newest" back into a direction.
+        self.sort_dropdown.addItem("Oldest \u2192 Newest", userData=True)
+        self.sort_dropdown.addItem("Newest \u2192 Oldest", userData=False)
+        self.sort_dropdown.currentIndexChanged.connect(self._on_sort_index_changed)
+        sort_row_layout.addWidget(self.sort_dropdown, stretch=1)
+
+        sidebar_layout.addWidget(sort_row)
+
+        # Range padding note — sits directly above TimeFrameSelector.
+        # Not literally inside that widget above its own Apply button
+        # (would need timeframe_selector.py's own layout code for that),
+        # but placed right above the whole Start/End/Apply block here in
+        # the sidebar so it's the last thing the investigator reads before
+        # applying. Empty until a filter is actually applied.
+        self.filter_range_label = QLabel("")
+        self.filter_range_label.setWordWrap(True)
+        self.filter_range_label.setStyleSheet("font-size: 10px; color: #5a6a8a;")
+        sidebar_layout.addWidget(self.filter_range_label)
 
         self.timeframe_selector = TimeFrameSelector(timezone="Asia/Dubai")
         sidebar_layout.addWidget(self.timeframe_selector)
@@ -313,6 +368,10 @@ class MainWindow(QMainWindow):
         self.dashboard.set_display_timezone(display_tz)
         self.timeframe_selector.set_timezone(display_tz)
 
+        # Phase 4 — newly imported panels should land in whatever sort
+        # order is already active, not raw file/merge order.
+        self._apply_sort_to_all_panels()
+
 
     def _on_timezone_changed(self, iana_tz: str) -> None:
         """Phase 1: TopNavBar.timezone_changed now emits the IANA timezone
@@ -374,22 +433,126 @@ class MainWindow(QMainWindow):
         """Register or unregister all open log panels with ScrollSyncManager
         (Section 4.7.3 SyncScroll) — Hiba's real implementation, replacing
         the earlier `pass` stub.
+
+        Phase 3 gate: Sync Scroll can only be switched ON once the sidebar's
+        Start/End time range (TimeFrameSelector) has been successfully
+        applied — reuses that existing filter state as the gate rather than
+        adding a second/separate validity dialog (locked-in decision). If
+        the investigator tries to enable it before that, the toggle button
+        is reverted back to unchecked and a message box explains why.
+
+        Note this only gates the moment of turning Sync Scroll ON. It does
+        not retroactively turn Sync Scroll back OFF if the time range is
+        cleared afterward while sync is already active — that's outside
+        what Phase 3 asked for, and would need its own decision (e.g.
+        whether clearing the filter mid-sync should silently disable sync,
+        or just leave it running against the last-applied range).
         """
+        if enabled and self._active_filter_config is None:
+            # The button has already flipped to "checked" by the time this
+            # handler runs (that's how QPushButton.toggled fires) — revert
+            # it rather than leaving it showing "on" for a sync that never
+            # actually started.
+            self.top_nav.set_sync_scroll_checked(False)
+            QMessageBox.warning(
+                self, "Sync Scroll", "Please enter a valid time range first."
+            )
+            return
+
         self._sync_scroll_enabled = enabled
         self._scroll_sync.clear()
         if enabled:
             for source_label, panel in self.log_panels.items():
                 self._scroll_sync.register_window(source_label, panel)
 
+            # Phase 8 — the moment sync is switched on, jump every panel
+            # to the START of the already-applied (and padded) highlighted
+            # range, so the investigator doesn't have to manually re-align
+            # them by hand first. That start timestamp becomes the
+            # reference/datum panels stay aligned around as the
+            # investigator scrolls from here. self._active_filter_config
+            # is guaranteed non-None at this point — the guard clause
+            # above already returned early otherwise.
+            self._scroll_sync.move_all_to_timestamp(self._active_filter_config.start_time)
+
+    def _on_sort_index_changed(self, index: int) -> None:
+        """Handles the sidebar sort dropdown directly (it's built inline in
+        _build_ui rather than as its own widget class, so MainWindow reads
+        userData itself instead of a child widget emitting a signal).
+        """
+        ascending = self.sort_dropdown.itemData(index)
+        self._on_sort_order_changed(bool(ascending))
+
+    def _on_sort_order_changed(self, ascending: bool) -> None:
+        """Phase 4 — the sidebar's single global sort dropdown. Applies to
+        every currently-open panel at once (not per-panel), and the chosen
+        direction is remembered on self._sort_ascending so any panel
+        imported afterwards (_on_import_logs / _load_mock_session) is
+        brought into the same order via _apply_sort_to_all_panels() rather
+        than sitting in raw file/merge order until re-touched.
+
+        LogTableModel.sort_by_timestamp() itself preserves each panel's
+        highlighted rows and current selection across the re-sort, so
+        nothing further needs to happen here for that.
+        """
+        self._sort_ascending = ascending
+        self._apply_sort_to_all_panels()
+
+    def _apply_sort_to_all_panels(self) -> None:
+        """Re-applies the current global sort direction to every open
+        panel's table model. Called both when the dropdown changes and
+        whenever new panels are added, so newly imported logs land in the
+        same order as everything already on screen instead of only sorting
+        on the next explicit dropdown change.
+        """
+        for panel in self.log_panels.values():
+            panel.table_model.sort_by_timestamp(self._sort_ascending)
+
     def _on_tab_selected(self, source_label: str) -> None:
         self.tab_manager.set_focused_tab(source_label)
         # TODO: bring the corresponding LogWindowWidget into focus / scroll
         # the panels_area so it is visible if off-screen.
 
+    def _pad_filter_config(self, config: FilterConfig) -> FilterConfig:
+        """Widens whatever start/end the investigator typed by 1 minute on
+        each side — subtracted from start_time, added to end_time — before
+        anything downstream ever sees the range: LogFilter matching, row
+        highlighting, the new auto-jump-to-first-match, Sync Scroll's
+        Phase 3 gate, and the dashboard's investigation-window shading all
+        read self._active_filter_config, so padding it exactly once, here,
+        means every one of those stays consistent automatically — none of
+        them need to know padding happened or re-derive it themselves.
+
+        Returns a shallow copy rather than mutating the FilterConfig
+        TimeFrameSelector handed us — that instance may still be read
+        elsewhere (e.g. by the sidebar for its own Start/End field display),
+        so mutating it in place would risk the padded values silently
+        leaking back into what the investigator sees typed in the boxes.
+        """
+        padded = copy.copy(config)
+        padded.start_time = config.start_time - timedelta(minutes=1)
+        padded.end_time = config.end_time + timedelta(minutes=1)
+        return padded
+
     def _on_filter_applied(self, config: FilterConfig) -> None:
         """Section 4.7.2 ApplyFilter (R4, R5, R6) — fully wired to the real
         LogFilter implementation.
         """
+        # Widen the investigator-entered range by ±1 minute before it's
+        # used for anything — see _pad_filter_config's docstring for why
+        # this happens exactly once, up front.
+        config = self._pad_filter_config(config)
+        self.filter_range_label.setText(
+            "Search window padded by 1 min before the start and 1 min after the end."
+        )
+
+        # Phase 3 — a successfully applied filter is what unlocks Sync
+        # Scroll (see _on_sync_scroll_toggled). Recorded here rather than
+        # in TimeFrameSelector itself, since MainWindow — not the sidebar
+        # widget — is what owns cross-component gating decisions per the
+        # module docstring's "sole orchestrator" rule.
+        self._active_filter_config = config
+
         all_entries = {
             source_label: panel.table_model.get_entries()
             for source_label, panel in self.log_panels.items()
@@ -404,9 +567,27 @@ class MainWindow(QMainWindow):
             return
 
         # Step 4 — highlight matched rows in each panel.
+        #
+        # Phase 5 — pass the matched RawLogEntry objects straight through
+        # rather than going via LogFilter.get_matched_row_indices() first.
+        # That helper returns each entry's row_index (Section 4.7.1's
+        # ORIGINAL file/import order), which was previously fed into
+        # highlight_matched() and treated as a current row POSITION —
+        # correct only by coincidence right after a fresh load, and wrong
+        # the moment the table has been sorted (Phase 4) into a different
+        # order than the file. LogWindowWidget/LogTableModel now track
+        # matched state by entry identity instead, so they need the
+        # entries themselves, not a position snapshot.
+        #
+        # Auto-jump: once a panel's matched state is up to date, scroll it
+        # straight to its own first (topmost, current-sort-order) matched
+        # row, so the investigator lands on the highlighted range
+        # immediately instead of having to scroll and hunt for it. Each
+        # panel jumps independently to ITS OWN first match — a source with
+        # no matches simply doesn't move.
         for source_label, panel in self.log_panels.items():
-            matched_indices = LogFilter.get_matched_row_indices(matched.get(source_label, []))
-            panel.highlight_matched(matched_indices)
+            panel.highlight_matched(matched.get(source_label, []))
+            panel.scroll_to_first_match()
 
         # Steps 5-6 — update tab states.
         active_sources, inactive_sources = LogFilter.get_active_inactive_sources(matched)
@@ -425,6 +606,13 @@ class MainWindow(QMainWindow):
         self.dashboard.matched_card.set_value(str(total_matched))
 
     def _on_filter_cleared(self) -> None:
+        # Phase 3 — clearing the filter revokes the Sync Scroll gate for
+        # any FUTURE attempt to turn sync on; see _on_sync_scroll_toggled's
+        # docstring for why this deliberately does not also turn off an
+        # already-active sync.
+        self._active_filter_config = None
+        self.filter_range_label.setText("")
+
         for panel in self.log_panels.values():
             panel.highlight_matched([])
         self.dashboard.set_investigation_window(None, None)
@@ -516,6 +704,10 @@ class MainWindow(QMainWindow):
             failures=stats["failures"], correlated=stats["correlated"],
         )
         self.dashboard.set_correlated_events(mock_data.MOCK_CORRELATED_EVENTS)
+
+        # Phase 4 — keep the mock loader consistent with the real import
+        # path above.
+        self._apply_sort_to_all_panels()
 
 
 def main() -> None:

@@ -19,6 +19,17 @@ Each entry's underlying IANA string (e.g. "Australia/Sydney") is stored as
 the QComboBox item's userData rather than parsed back out of the display
 label, since three of the new zones observe DST and therefore don't have a
 single fixed "UTC+X" that could safely be baked into a static label string.
+
+Phase 3 note: the Sync Scroll button now has TWO independent gates on it:
+    - enabled/disabled (existing, panel-count based — set_sync_scroll_
+      enabled(), requires >= 2 open panels)
+    - checked/unchecked (new, Phase 3 — set_sync_scroll_checked(), used by
+      MainWindow to revert the toggle back to "off" if it's clicked before
+      a valid time range has been applied in the sidebar)
+These are deliberately separate concerns: "enabled" is about whether the
+button can be interacted with at all, "checked" is its on/off state once
+interacted with. TopNavBar itself has no idea whether a valid time range
+exists — that's MainWindow's business logic, not this widget's.
 """
 
 from PySide6.QtCore import Signal
@@ -107,20 +118,29 @@ class TopNavBar(QWidget):
             self.timezone_changed.emit(iana_tz)
 
     def _on_sync_toggled(self, checked: bool) -> None:
+        self._apply_toggle_style(checked)
+        self.sync_scroll_toggled.emit(checked)
+
+    def _apply_toggle_style(self, checked: bool) -> None:
+        """Shared by the user-driven toggle path (_on_sync_toggled) and the
+        programmatic revert path (set_sync_scroll_checked) so both keep the
+        button's visual "on" styling in sync with its actual checked state.
+        """
         self.sync_scroll_button.setObjectName("ToggleActive" if checked else "")
         self.sync_scroll_button.setStyleSheet("")  # force re-polish
-        self.sync_scroll_toggled.emit(checked)
 
     def set_loaded_count(self, count: int) -> None:
         self.status_label.setText(f"{count} log{'s' if count != 1 else ''} loaded")
 
     def set_sync_scroll_enabled(self, enabled: bool) -> None:
-        """TODO (Section 6.3.6 edge case):
-        Disable sync scroll toggle with a tooltip when fewer than 2 panels
-        are open: "Requires at least 2 log panels."
-        """
         self.sync_scroll_button.setEnabled(enabled)
         if not enabled:
             self.sync_scroll_button.setToolTip("Requires at least 2 log panels.")
         else:
             self.sync_scroll_button.setToolTip("")
+
+    def set_sync_scroll_checked(self, checked: bool) -> None:
+        self.sync_scroll_button.blockSignals(True)
+        self.sync_scroll_button.setChecked(checked)
+        self.sync_scroll_button.blockSignals(False)
+        self._apply_toggle_style(checked)

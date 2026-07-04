@@ -41,7 +41,22 @@ class LogTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._columns = columns
         self._entries: list[RawLogEntry] = entries or []
-        self._matched_indices: set[int] = set()
+
+        # Phase 5 — matched/highlighted state is tracked by entry IDENTITY
+        # (id()), not by row position. Before this, highlight_matched()
+        # took a list[int] that MainWindow built from LogFilter.
+        # get_matched_row_indices(), i.e. each entry's *original file*
+        # row_index (Section 4.7.1 order) — and stored those ints as if
+        # they were current row POSITIONS in this model. That happened to
+        # look correct immediately after a fresh load (position == file
+        # order at that moment), but the moment the table is re-sorted
+        # (Phase 4) — or if a filter is applied while some other order is
+        # already active — row_index no longer has any relationship to
+        # where that entry actually sits on screen, so the highlight
+        # painted the wrong rows entirely. Keying on id() instead means
+        # "is this entry matched" no longer depends on position at all, so
+        # nothing goes stale when the position changes.
+        self._matched_ids: set[int] = set()
         self._selected_row: int | None = None
 
         # The timezone the TIMESTAMP column is currently rendered in. This
@@ -100,7 +115,9 @@ class LogTableModel(QAbstractTableModel):
         if role == Qt.BackgroundRole:
             if index.row() == self._selected_row:
                 return COLOR_SELECTED_BG
-            if index.row() in self._matched_indices:
+            # Phase 5 — identity check, not a row-position set membership
+            # test, so this stays correct regardless of sort order.
+            if id(entry) in self._matched_ids:
                 return COLOR_HIGHLIGHTED_BG
             return None
 
@@ -111,7 +128,7 @@ class LogTableModel(QAbstractTableModel):
                     return STATUS_COLORS[status_value]
             if index.row() == self._selected_row:
                 return COLOR_SELECTED_TEXT
-            if index.row() in self._matched_indices:
+            if id(entry) in self._matched_ids:
                 return COLOR_HIGHLIGHTED_TEXT
             return COLOR_DEFAULT_TEXT
 
@@ -145,6 +162,13 @@ class LogTableModel(QAbstractTableModel):
         conversion itself was correct (Dubai vs Perth produced UTC values
         4 hours apart, as expected) — only the display layer was wrong.
 
+        Includes the full date (not just HH:MM:SS.mmm) — this is what
+        Phase 2 (copy/paste) depends on: LogWindowWidget's copy action
+        copies this exact string to the clipboard, and it needs to be
+        pasteable directly into TimeFrameSelector's Start/End fields
+        (which expect "YYYY-MM-DD HH:MM:SS.mmm") without the investigator
+        having to manually add today's date back in.
+
         Falls back to the raw string when normalized_timestamp is None
         (TimestampNormalizer couldn't parse this row, or hasn't run at
         all) — this is a legitimate fallback, not silently masking a bug,
@@ -161,7 +185,7 @@ class LogTableModel(QAbstractTableModel):
 
         local_dt = entry.normalized_timestamp.utc_datetime.astimezone(tz_obj)
         ms = entry.normalized_timestamp.milliseconds
-        return local_dt.strftime("%H:%M:%S") + f".{ms:03d}"
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms:03d}"
 
     # -- Public API used by LogWindowWidget -------------------------------------
 
@@ -183,19 +207,27 @@ class LogTableModel(QAbstractTableModel):
         """Replace all rows. Called after import (R1) or after a new file load."""
         self.beginResetModel()
         self._entries = entries
-        self._matched_indices.clear()
+        self._matched_ids.clear()
         self._selected_row = None
         self.endResetModel()
 
-    def highlight_matched(self, matched_row_indices: list[int]) -> None:
-        """Mark rows as within the active investigation window.
+    def highlight_matched(self, matched_entries: list[RawLogEntry]) -> None:
+        """Mark entries as within the active investigation window.
 
-        TODO (R5/R6 — Section 4.7.2 ApplyFilter step 4):
-            Called by LogFilter.apply_filter() results, routed through
-            LogWindowWidget.highlight_matched().
+        Phase 5 — takes the matched RawLogEntry objects themselves, not a
+        list of row indices. The previous version took list[int] built by
+        MainWindow from LogFilter.get_matched_row_indices(), which is each
+        entry's `row_index` — its position in the ORIGINAL file/import
+        order (Section 4.7.1) — and treated those ints as current row
+        POSITIONS in this model. That's only ever true immediately after a
+        fresh load; the instant the model is re-sorted (Phase 4), or if a
+        filter is (re-)applied while a non-default sort is already active,
+        row_index no longer lines up with where that entry is actually
+        displayed, so the wrong rows got highlighted. Storing by id()
+        instead means membership no longer depends on position at all.
         """
         self.beginResetModel()
-        self._matched_indices = set(matched_row_indices)
+        self._matched_ids = {id(e) for e in matched_entries}
         self.endResetModel()
 
     def set_selected_row(self, row: int | None) -> None:
@@ -204,9 +236,74 @@ class LogTableModel(QAbstractTableModel):
         self._selected_row = row
         self.endResetModel()
 
+    def sort_by_timestamp(self, ascending: bool = True) -> None:
+        """Phase 4 — global sort, keyed on normalized_timestamp (UTC
+        datetime + milliseconds), so ordering is correct regardless of
+        display timezone or the raw/original timestamp string.
+
+        Preserves the current selection across the re-sort by remapping it
+        via entry IDENTITY (Python's id()) rather than by row index — row
+        index is exactly what changes when we sort, so the old
+        _selected_row integer would otherwise point at the wrong row the
+        instant the order changes. This is the same principle Phase 5
+        applies to highlighting more generally (see LogTableModel.
+        highlight_matched()): matched state is stored by id() there too,
+        so — unlike selection — it doesn't need any remapping here at all;
+        it was never expressed in terms of row position to begin with.
+
+        Entries with no normalized_timestamp (TimestampNormalizer couldn't
+        parse that row, or hasn't run yet) are always placed at the end,
+        regardless of ascending/descending, rather than sorting them to
+        whichever end the current direction happens to put them — an
+        unparseable row doesn't have a "newest" or "oldest" position, so it
+        shouldn't jump from the bottom to the top just because the
+        direction was flipped.
+        """
+        selected_id = None
+        if self._selected_row is not None and 0 <= self._selected_row < len(self._entries):
+            selected_id = id(self._entries[self._selected_row])
+
+        parsed = [e for e in self._entries if e.normalized_timestamp is not None]
+        unparsed = [e for e in self._entries if e.normalized_timestamp is None]
+        parsed.sort(
+            key=lambda e: (e.normalized_timestamp.utc_datetime, e.normalized_timestamp.milliseconds),
+            reverse=not ascending,
+        )
+
+        self.beginResetModel()
+        self._entries = parsed + unparsed
+        # _matched_ids is intentionally left untouched — see docstring above.
+        self._selected_row = None
+        if selected_id is not None:
+            for i, e in enumerate(self._entries):
+                if id(e) == selected_id:
+                    self._selected_row = i
+                    break
+        self.endResetModel()
+
     def entry_at(self, row: int) -> RawLogEntry | None:
         if 0 <= row < len(self._entries):
             return self._entries[row]
+        return None
+
+    def first_matched_row(self) -> int | None:
+        """Returns the row POSITION (in current display/sort order) of the
+        first matched entry, or None if nothing is currently matched.
+
+        Used by LogWindowWidget.scroll_to_first_match() so investigators
+        land on the actual topmost highlighted row after applying a filter,
+        rather than having to scroll and hunt for it manually. Iterates
+        self._entries in display order (not the matched-ids set itself,
+        which has no order) so "first" always means "topmost as currently
+        sorted" — e.g. earliest chronologically under Oldest→Newest,
+        latest under Newest→Oldest — consistent with whatever direction
+        Phase 4's sort control is set to at the time.
+        """
+        if not self._matched_ids:
+            return None
+        for row, entry in enumerate(self._entries):
+            if id(entry) in self._matched_ids:
+                return row
         return None
 
     def get_entries(self) -> list[RawLogEntry]:

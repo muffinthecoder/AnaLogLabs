@@ -57,7 +57,9 @@ class ScrollSyncManager:
                 scrolled. Must have a `.source_label` attribute and a
                 `.table_model.get_entries()` method returning entries
                 sorted ascending by utc_datetime.
-            scroll_position: the top-visible row index in source_window.
+            scroll_position: the row index visible at the CENTER of
+                source_window's viewport (Phase 8 — see LogWindowWidget.
+                _on_scroll for why center rather than the top row).
 
         Side effect:
             Calls `.receive_sync_scroll(index)` on every OTHER registered
@@ -75,15 +77,15 @@ class ScrollSyncManager:
 
         try:
             # Step 3 — get the anchor timestamp from the source window's
-            # currently top-visible entry.
+            # currently center-visible entry.
             source_entries = source_window.table_model.get_entries()
             if not source_entries or scroll_position >= len(source_entries):
                 return
 
-            top_entry: RawLogEntry = source_entries[scroll_position]
-            if top_entry.normalized_timestamp is None:
+            anchor_entry: RawLogEntry = source_entries[scroll_position]
+            if anchor_entry.normalized_timestamp is None:
                 return
-            anchor_ts = top_entry.normalized_timestamp.utc_datetime
+            anchor_ts = anchor_entry.normalized_timestamp.utc_datetime
 
             # Step 4 — for every other registered window, binary search for
             # the closest entry by timestamp, then move it there.
@@ -102,6 +104,38 @@ class ScrollSyncManager:
             # Step 5 — always release the lock, even if an exception occurs
             # above, or every subsequent scroll event would be silently
             # dropped.
+            self.is_syncing = False
+
+    def move_all_to_timestamp(self, anchor_ts: datetime) -> None:
+        """Phase 8 — moves every currently registered window to the row
+        whose timestamp is closest to `anchor_ts`, with no source window
+        involved.
+
+        Used the moment Sync Scroll is switched on: the investigator's
+        already-applied highlighted time range has a start timestamp, and
+        that becomes the reference/datum every open panel is snapped to
+        immediately, before any further user-driven scrolling takes over
+        and starts panel-to-panel syncing via sync_scroll() above.
+
+        Deliberately a separate entry point from sync_scroll() rather than
+        routing through it with a fake "source" — there IS no source panel
+        for this move, and forcing one in just to reuse the loop would mean
+        skipping whichever panel matched that fake source (sync_scroll
+        always skips source_window.source_label), which is wrong here:
+        every panel, including whichever one happens to be topmost/active,
+        needs to move to the datum.
+        """
+        if self.is_syncing:
+            return
+        self.is_syncing = True
+        try:
+            for window in self.registered_windows.values():
+                entries = window.table_model.get_entries()
+                if not entries:
+                    continue
+                closest_index = self._find_closest_index(entries, anchor_ts)
+                window.receive_sync_scroll(closest_index)
+        finally:
             self.is_syncing = False
 
     @staticmethod
