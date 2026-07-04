@@ -103,16 +103,28 @@ class TimeFrameSelector(QWidget):
         self.clear_button.clicked.connect(self._on_clear_clicked)
         layout.addWidget(self.clear_button)
 
-    def _parse_user_datetime(self, text: str) -> datetime | None:
-        """Parses a Start/End field against the accepted format list, returning
-        a naive datetime or None if nothing matched.
+    def _parse_user_datetime(self, text: str) -> tuple[datetime | None, bool]:
+        """Parses a Start/End field, returning (naive_datetime, is_utc).
+
+        Accepts pasted timestamps from either log column:
+          * CONVERTED TIMESTAMP copies as "YYYY-MM-DD HH:MM:SS.mmm" in the
+            display timezone → interpreted in the display timezone.
+          * ORIGINAL LOG TIME may end in "Z" (e.g. "2026-03-25T01:05:02Z") →
+            that is UTC, so is_utc is returned True and the display timezone is
+            NOT applied.
+        Returns (None, False) if nothing matched.
         """
+        cleaned = text.strip()
+        is_utc = False
+        if cleaned.endswith(("Z", "z")):
+            cleaned = cleaned[:-1].strip()
+            is_utc = True
         for fmt in _INPUT_FORMATS:
             try:
-                return datetime.strptime(text, fmt)
+                return datetime.strptime(cleaned, fmt), is_utc
             except ValueError:
                 continue
-        return None
+        return None, is_utc
 
     def _on_apply_clicked(self) -> None:
         """Section 4.7.2 ApplyFilter step 1 — validation before emitting.
@@ -130,8 +142,8 @@ class TimeFrameSelector(QWidget):
             self._show_error("Both start and end times are required.")
             return
 
-        start_dt_naive = self._parse_user_datetime(start_text)
-        end_dt_naive = self._parse_user_datetime(end_text)
+        start_dt_naive, start_is_utc = self._parse_user_datetime(start_text)
+        end_dt_naive, end_is_utc = self._parse_user_datetime(end_text)
         if start_dt_naive is None or end_dt_naive is None:
             self._show_error("Invalid date/time format entered.")
             return
@@ -140,12 +152,17 @@ class TimeFrameSelector(QWidget):
             self._show_error("Start time must be before end time.")
             return
 
-        # LogFilter.apply_filter requires UTC-aware datetimes — localise
-        # using the investigator's selected timezone, then convert to UTC,
-        # rather than passing naive datetimes through.
-        tz_obj = pytz.timezone(self.timezone)
-        start_dt = tz_obj.localize(start_dt_naive).astimezone(pytz.UTC)
-        end_dt = tz_obj.localize(end_dt_naive).astimezone(pytz.UTC)
+        # LogFilter.apply_filter requires UTC-aware datetimes. A value that
+        # carried a "Z" is already UTC; otherwise localise using the selected
+        # display timezone, then convert to UTC.
+        display_tz = pytz.timezone(self.timezone)
+
+        def to_utc(naive, is_utc):
+            zone = pytz.UTC if is_utc else display_tz
+            return zone.localize(naive).astimezone(pytz.UTC)
+
+        start_dt = to_utc(start_dt_naive, start_is_utc)
+        end_dt = to_utc(end_dt_naive, end_is_utc)
 
         # R4 — widen the window by ±1 minute so boundary events are caught.
         # Applied on the UTC datetimes since an offset is timezone-agnostic.

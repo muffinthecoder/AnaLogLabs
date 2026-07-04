@@ -12,13 +12,11 @@ Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
 """
 
-from datetime import timedelta
-
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QAction
+from PySide6.QtGui import QColor, QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView, QPushButton, QAbstractItemView, QMenu,
+    QHeaderView, QPushButton, QAbstractItemView, QMenu, QApplication,
 )
 
 from src.models.data_classes import RawLogEntry
@@ -59,9 +57,9 @@ class LogWindowWidget(QWidget):
     # window that can be moved anywhere on the desktop.
     detach_requested = Signal(str)  # source_label
 
-    # R5 — emitted whenever a row is flagged/unflagged here, so MainWindow can
-    # recompute the cross-file markers shown in every other open panel.
-    flags_changed = Signal(str)  # source_label
+    # Section 4.2 — emitted when the investigator flags/unflags a row. Carries
+    # the RawLogEntry so MainWindow can add/remove a shared ±30s flag anchor.
+    flag_toggle_requested = Signal(object)  # RawLogEntry
 
     def __init__(self, source_label: str, color_hex: str, columns: list[str], parent=None):
         super().__init__(parent)
@@ -80,6 +78,12 @@ class LogWindowWidget(QWidget):
         # ---- Panel header --------------------------------------------------
         header = QFrame()
         header.setObjectName("LogPanelHeader")
+        # Section 5.3 — a coloured top accent tied to the file's palette colour,
+        # so a window (docked or popped out) is visually correlatable to its
+        # heatmap row / spike series / legend swatch.
+        header.setStyleSheet(
+            f"QFrame#LogPanelHeader {{ border-top: 2px solid {self.color_hex}; }}"
+        )
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 6, 10, 6)
 
@@ -92,7 +96,7 @@ class LogWindowWidget(QWidget):
         self.filename_label.setStyleSheet("font-weight: 500; font-size: 11px;")
         header_layout.addWidget(self.filename_label)
 
-        self.timezone_badge = QLabel("UTC+4")
+        self.timezone_badge = QLabel("UTC+8")
         self.timezone_badge.setStyleSheet(
             "background-color: #1e2a4a; color: #4a5a7a; font-size: 10px; "
             "padding: 1px 5px; border-radius: 10px;"
@@ -219,11 +223,18 @@ class LogWindowWidget(QWidget):
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._on_context_menu)
 
-        # TODO (Section 4.7.3 SyncScroll):
-        #   Connect verticalScrollBar().valueChanged to _on_scroll() so
-        #   ScrollSyncManager can detect when this panel scrolls. Placeholder
-        #   wired below — real binary-search-by-timestamp logic belongs in
-        #   ScrollSyncManager, not here.
+        # Copy support — Ctrl+C copies the selected cell so the investigator can
+        # paste a timestamp straight into the time-range boxes. On the CONVERTED
+        # TIMESTAMP column it copies the full display date+time (paste-ready);
+        # on ORIGINAL LOG TIME it copies the raw value; elsewhere the cell text.
+        copy_shortcut = QShortcut(QKeySequence.Copy, self.table_view)
+        copy_shortcut.activated.connect(self._copy_selection)
+
+        # Sync scroll: a scrollbar move emits `scrolled`, which the unified
+        # LockedWorkspace listens to (reading this panel's CENTER timestamp and
+        # aligning every other panel by nearest timestamp). Programmatic moves
+        # via center_on_row()/receive_sync_scroll() block this signal to avoid
+        # recursive sync.
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
         layout.addWidget(self.table_view)
@@ -278,7 +289,8 @@ class LogWindowWidget(QWidget):
         # generic floor (80px) since log_parser.py's _FIELD_NAME_ALIASES
         # covers many but not all possible source columns.
         column_min_widths = {
-            "timestamp": 160,
+            "original_log_time": 175,
+            "timestamp": 130,
             "date": 160,
             "username": 130,
             "ip_address": 120,
@@ -335,24 +347,38 @@ class LogWindowWidget(QWidget):
         finally:
             scrollbar.blockSignals(False)
 
-    def flagged_timestamps(self) -> list:
-        """R5 — UTC datetimes (ms-inclusive) of every row flagged in this
-        file, used by MainWindow to place cross-file markers elsewhere.
-        Rows without a normalized timestamp can't be positioned in time, so
-        they're skipped here.
+    def set_flag_anchors(self, anchors: list) -> None:
+        """Section 4.2 — apply the shared ±30s flag anchors to this window's
+        model so every correlated event renders flagged consistently.
         """
-        stamps = []
-        for entry in self.table_model.flagged_entries():
-            nts = entry.normalized_timestamp
-            if nts is not None:
-                stamps.append(nts.utc_datetime + timedelta(milliseconds=nts.milliseconds))
-        return stamps
+        self.table_model.set_flag_anchors(anchors)
 
-    def set_cross_markers(self, markers: dict) -> None:
-        """R5 — apply markers (row_index -> origin color hex) computed by
-        MainWindow from other files' flags.
+    def scroll_to_time(self, utc_dt) -> None:
+        """Scroll so the first row at/after utc_dt is at the top (Sections 3 &
+        4.1 — jump to range start / a file's first entry). Uses the sync path
+        so it does not re-emit a scroll and cause feedback.
         """
-        self.table_model.set_cross_markers(markers)
+        entries = self.table_model.get_entries()
+        if not entries:
+            return
+        target = 0
+        found = False
+        for i, e in enumerate(entries):
+            nts = e.normalized_timestamp
+            if nts is not None and nts.utc_datetime >= utc_dt:
+                target = i
+                found = True
+                break
+        if not found:
+            target = len(entries) - 1
+        self.receive_sync_scroll(target)
+
+    def first_entry_time(self):
+        """UTC datetime of this file's earliest event, or None."""
+        for e in self.table_model.get_entries():
+            if e.normalized_timestamp is not None:
+                return e.normalized_timestamp.utc_datetime
+        return None
 
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)
@@ -377,23 +403,87 @@ class LogWindowWidget(QWidget):
             self.row_selected.emit(entry)
 
     def _on_context_menu(self, pos) -> None:
-        """R5 — build the right-click flag menu for the row under the cursor."""
+        """Section 4.2 — right-click flag menu for the row under the cursor.
+        Emits the entry so MainWindow can add/remove a shared ±30s anchor;
+        this window does not toggle its own state directly.
+        """
         index = self.table_view.indexAt(pos)
         if not index.isValid():
             return
-        row = index.row()
+        entry = self.table_model.entry_at(index.row())
+        if entry is None:
+            return
 
+        already = self.table_model._is_flagged_row(index.row())
         menu = QMenu(self)
-        if self.table_model.is_flagged(row):
-            action = QAction("⚑ Remove flag", self)
-        else:
-            action = QAction("⚑ Flag this event", self)
+        label = "⚑ Remove flag (±30s)" if already else "⚑ Flag event (+ correlate ±30s)"
+        action = QAction(label, self)
         menu.addAction(action)
 
         chosen = menu.exec(self.table_view.viewport().mapToGlobal(pos))
         if chosen is action:
-            self.table_model.toggle_flag(row)
-            self.flags_changed.emit(self.source_label)
+            self.flag_toggle_requested.emit(entry)
+
+    def _copy_selection(self) -> None:
+        """Ctrl+C — copy the current cell to the clipboard. Timestamps are
+        copied in a paste-ready form for the time-range boxes.
+        """
+        index = self.table_view.currentIndex()
+        if not index.isValid():
+            return
+        entry = self.table_model.entry_at(index.row())
+        if entry is None:
+            return
+        column_key = self.table_model.column_key_at(index.column())
+        if column_key == "timestamp":
+            text = self.table_model.full_display_datetime(entry)
+        elif column_key == "original_log_time":
+            text = entry.raw_timestamp
+        else:
+            text = self.table_model.data(index, Qt.DisplayRole) or ""
+        QApplication.clipboard().setText(str(text))
+
+    def center_on_row(self, row: int) -> None:
+        """Programmatically centre `row` in the viewport WITHOUT emitting the
+        scrolled signal — used by the unified locked view to align this panel
+        to a target timestamp. blockSignals() on the scrollbar prevents this
+        programmatic move from being mistaken for a user scroll (recursion).
+        """
+        if not self.table_model.rowCount():
+            return
+        row = max(0, min(row, self.table_model.rowCount() - 1))
+        scrollbar = self.table_view.verticalScrollBar()
+        scrollbar.blockSignals(True)
+        try:
+            index = self.table_model.index(row, 0)
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.scroll_position = scrollbar.value()
+            self._update_scroll_indicator(row)
+        finally:
+            scrollbar.blockSignals(False)
+
+    def visible_center_time(self):
+        """UTC epoch seconds of the timestamp at the CENTER of the viewport
+        (sync on the centre row, not the top row). Falls back to the midpoint
+        of the visible rows when the exact centre pixel lands on empty space.
+        """
+        table = self.table_view
+        viewport = table.viewport()
+        centre = viewport.rect().center()
+        row = table.indexAt(centre).row()
+        if row < 0:
+            top = table.rowAt(0)
+            bottom = table.rowAt(viewport.height() - 1)
+            if top >= 0 and bottom >= 0:
+                row = (top + bottom) // 2
+            elif top >= 0:
+                row = top
+            else:
+                row = bottom
+        entry = self.table_model.entry_at(row) if row >= 0 else None
+        if entry is not None and entry.normalized_timestamp is not None:
+            return entry.normalized_timestamp.utc_datetime.timestamp()
+        return None
 
     def _on_scroll(self, value: int) -> None:
         """Fires on every vertical scrollbar movement (mouse wheel, drag,

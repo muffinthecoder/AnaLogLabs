@@ -39,21 +39,17 @@ class LogTab(QFrame):
 
         layout.addStretch()
 
-        self.count_badge = QLabel("0")
-        self.count_badge.setStyleSheet(
-            "font-size: 10px; background-color: #1e2a4a; color: #4a5a7a; "
-            "padding: 1px 5px; border-radius: 10px;"
-        )
-        layout.addWidget(self.count_badge)
+        # Section 3 — the per-file count badge was removed as noise.
 
         self.set_state("inactive")
 
     def set_state(self, state: str) -> None:
         """state: 'active' | 'match' | 'inactive'
 
-        TODO (Hiba/Fatima — Section 4.7.2 step 5-6):
-            Called from TabManager.highlight_active_tabs() once LogFilter
-            returns matched/active/inactive source lists.
+        Driven by TabManager.highlight_active_tabs() from LogFilter results:
+        'match' = this file has events in the window, 'inactive' = it doesn't.
+        (Clicking a file no longer sets a persistent 'active' highlight — the
+        file list is display-only.)
         """
         self.state = state
         if state == "active":
@@ -68,9 +64,6 @@ class LogTab(QFrame):
             self.dot.setStyleSheet("background-color: #3a4a6a; border-radius: 3px;")
             self.setStyleSheet("background-color: transparent; border: 1px solid transparent; border-radius: 4px;")
             self.setWindowOpacity(0.6)
-
-    def set_match_count(self, count: int) -> None:
-        self.count_badge.setText(str(count))
 
     def mousePressEvent(self, event) -> None:
         self.clicked_tab.emit(self.source_label)
@@ -115,11 +108,8 @@ class TabManager(QWidget):
             tab.deleteLater()
 
     def highlight_active_tabs(self, active_sources: list[str], inactive_sources: list[str]) -> None:
-        """Section 4.7.2 step 6 — called after ApplyFilter completes.
-
-        TODO (Hiba):
-            active_sources -> state "match" (or "active" for currently focused)
-            inactive_sources -> state "inactive"
+        """Called after ApplyFilter completes: active_sources -> "match",
+        inactive_sources -> "inactive".
         """
         for label in active_sources:
             if label in self._tabs:
@@ -128,10 +118,19 @@ class TabManager(QWidget):
             if label in self._tabs:
                 self._tabs[label].set_state("inactive")
 
-    def set_match_count(self, source_label: str, count: int) -> None:
-        if source_label in self._tabs:
-            self._tabs[source_label].set_match_count(count)
-
     def set_focused_tab(self, source_label: str) -> None:
         for label, tab in self._tabs.items():
             tab.set_state("active" if label == source_label else tab.state)
+
+    def order(self) -> list[str]:
+        return list(self._tabs.keys())
+
+    def reorder(self, ordered_labels: list[str]) -> None:
+        """Re-lay the tabs in the given order (Section 3 sort-by-name). The
+        section title stays at the top; only the tab widgets are re-added.
+        """
+        for label in ordered_labels:
+            tab = self._tabs.get(label)
+            if tab is not None:
+                self.layout_.removeWidget(tab)
+                self.layout_.addWidget(tab)
