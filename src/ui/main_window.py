@@ -35,7 +35,7 @@ from src import mock_data
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
 from src.parser.log_parser import LogParser
-from src.normaliser.timezone_map import set_timezone_for_source
+from src.normaliser.timezone_map import set_timezone_for_source, display_label_for_timezone
 from src.correlator.scroll_sync_manager import ScrollSyncManager
 
 # TODO (Fatima — styles.py):
@@ -225,6 +225,27 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    @staticmethod
+    def _badge_label_for_panel(iana_tz: str, panel: LogWindowWidget) -> str:
+        """Returns the full "Country (City), UTC+X" badge text for one panel,
+        with the UTC offset computed against that panel's OWN loaded data
+        (its earliest entry) rather than "now" — see timezone_map.py's
+        get_utc_offset_label() docstring for why this matters for the
+        DST-observing zones (Adelaide, Melbourne, Sydney): the same zone can
+        legitimately show a different offset for different panels if their
+        data falls in different DST periods.
+
+        Falls back to "now" (via display_label_for_timezone's default) if
+        the panel has no valid normalized entries yet to anchor to.
+        """
+        reference_dt = None
+        entries = panel.table_model.get_entries()
+        for entry in entries:
+            if entry.normalized_timestamp is not None:
+                reference_dt = entry.normalized_timestamp.utc_datetime
+                break
+        return display_label_for_timezone(iana_tz, reference_dt)
+
     # -- Signal handlers -----------------------------------------------------------
 
     def _on_import_logs(self) -> None:
@@ -281,24 +302,27 @@ class MainWindow(QMainWindow):
             self.dashboard.load_entries(result.source_label, result.valid_entries, color)
 
         # Apply display timezone to every panel (including ones just added).
-        tz_label_map = {
-            "Asia/Dubai": "Dubai (GST, UTC+4)",
-            "Asia/Singapore": "Singapore (SGT, UTC+8)",
-            "Australia/Perth": "Perth (AWST, UTC+8)",
-        }
-        tz_label = tz_label_map.get(display_tz, display_tz)
-        tz_short = tz_label.split("(")[1].split(",")[1].strip(") ")
-
+        # Each panel's badge is computed from ITS OWN loaded entries (below)
+        # rather than a single shared string, since DST-observing zones can
+        # legitimately show a different UTC offset per panel depending on
+        # what dates that panel's data actually falls on.
         for panel in self.log_panels.values():
-            panel.set_timezone_label(tz_short)
+            panel.set_timezone_label(self._badge_label_for_panel(display_tz, panel))
             panel.set_display_timezone(display_tz)
 
         self.dashboard.set_display_timezone(display_tz)
         self.timeframe_selector.set_timezone(display_tz)
 
 
-    def _on_timezone_changed(self, timezone_label: str) -> None:
-        """TODO (R3 — Section 4.7.5 NormalizeTimestamp):
+    def _on_timezone_changed(self, iana_tz: str) -> None:
+        """Phase 1: TopNavBar.timezone_changed now emits the IANA timezone
+        string directly (e.g. "Australia/Sydney") rather than a display
+        label — the old approach of parsing "UTC+X" back out of a label
+        string breaks for the DST-observing zones (Adelaide, Melbourne,
+        Sydney), which don't have one single fixed offset to embed in a
+        static label at all. See TopNavBar's module docstring.
+
+        TODO (R3 — Section 4.7.5 NormalizeTimestamp):
             set_timezone_for_source() below updates SOURCE_TIMEZONE_
             ASSIGNMENTS, which TimestampNormalizer.normalize_for_source()
             reads — but only the NEXT time a file is parsed. Entries already
@@ -324,12 +348,6 @@ class MainWindow(QMainWindow):
         separate "what timezone was this log written in" from "what
         timezone do I want to view times in" as two distinct controls.
         """
-        label_to_iana = {
-            "Dubai (GST, UTC+4)": "Asia/Dubai",
-            "Singapore (SGT, UTC+8)": "Asia/Singapore",
-            "Perth (AWST, UTC+8)": "Australia/Perth",
-        }
-        iana_tz = label_to_iana.get(timezone_label, "Asia/Dubai")
         self.timeframe_selector.set_timezone(iana_tz)
         self.dashboard.set_display_timezone(iana_tz)
 
@@ -337,11 +355,13 @@ class MainWindow(QMainWindow):
             set_timezone_for_source(source_label, iana_tz)
 
         for panel in self.log_panels.values():
-            tz_short = timezone_label.split("(")[1].split(",")[1].strip(") ")
-            panel.set_timezone_label(tz_short)
+            # Badge text is computed per-panel from that panel's own loaded
+            # entries (DST-aware — see _badge_label_for_panel's docstring),
+            # not parsed from the dropdown's display label.
+            panel.set_timezone_label(self._badge_label_for_panel(iana_tz, panel))
 
-            # The actual fix: set_timezone_label() above only updates the
-            # small "UTC+4" badge text. Without this call, every row's
+            # The actual fix (pre-Phase-1): set_timezone_label() above only
+            # updates the small badge text. Without this call, every row's
             # TIMESTAMP column kept showing the raw, unconverted source
             # string regardless of which timezone was selected — confirmed
             # by importing the same WLC log under Dubai then Perth and

@@ -30,6 +30,7 @@ import pytz
 from PySide6.QtCore import Qt, Signal
 
 from src.models.data_classes import RawLogEntry
+from src.normaliser.timezone_map import get_utc_offset_seconds
 
 # Vertical spacing between source rows, in plot Y units. Rows are simply
 # integers (0, 1, 2, ...) — the axis below replaces the numeric ticks with
@@ -57,11 +58,19 @@ class TimelineWidget(pg.PlotWidget):
     point_clicked = Signal(str)  # ISO-format UTC timestamp string
 
     def __init__(self, parent=None, display_tz: str = "Asia/Dubai"):
+        # No log data is loaded yet at construction time, so there is no
+        # real-data reference date to anchor a DST-observing zone's offset
+        # to — get_utc_offset_seconds() falls back to "now" here, same as
+        # before Phase 1. Once set_entries()/set_display_timezone() run with
+        # real data, _rebuild_axis() recomputes against that data's own
+        # dates instead.
+        self._display_tz = display_tz
+
         # DateAxisItem's utcOffset is "seconds to ADD to a UTC timestamp's
         # offset", applied with its sign inverted internally — verified
         # empirically (Dubai/UTC+4 needs utcOffset=-14400, not +14400) since
         # this is a known point of confusion in PyQtGraph's own docs/issues.
-        offset_seconds = -self._tz_offset_seconds(display_tz)
+        offset_seconds = -get_utc_offset_seconds(display_tz)
         super().__init__(parent, axisItems={"bottom": pg.DateAxisItem(utcOffset=offset_seconds)})
         self.setBackground(None)
 
@@ -98,20 +107,40 @@ class TimelineWidget(pg.PlotWidget):
 
         self._show_empty_state()
 
-    @staticmethod
-    def _tz_offset_seconds(tz_name: str) -> int:
-        """Returns the current UTC offset, in seconds, for an IANA
-        timezone name — e.g. 14400 for "Asia/Dubai" (UTC+4). Computed
-        against "now" rather than a fixed date so DST-observing zones
-        (not currently relevant to Perth/Singapore/Dubai, but kept general
-        in case more sources are added later) resolve correctly.
+    def _earliest_reference_dt(self) -> datetime | None:
+        """Returns the earliest normalized UTC timestamp across all
+        currently loaded entries, used to anchor a DST-observing zone's
+        offset to the actual period the loaded data falls in — NOT to
+        "today", which was the source of the pre-Phase-1 bug (Perth,
+        Singapore, and Dubai never observe DST, so this distinction was
+        invisible until Adelaide/Melbourne/Sydney were added).
+
+        Returns None if no valid entries are loaded yet (e.g. at startup,
+        or immediately after clear_timeline()) — callers fall back to "now"
+        in that case via get_utc_offset_seconds()'s own default.
         """
-        try:
-            tz_obj = pytz.timezone(tz_name)
-        except pytz.UnknownTimeZoneError:
-            tz_obj = pytz.timezone("Asia/Dubai")
-        offset = tz_obj.utcoffset(datetime.utcnow())
-        return int(offset.total_seconds())
+        all_timestamps = [
+            entry.normalized_timestamp.utc_datetime
+            for entries in self._entries_by_source.values()
+            for entry in entries
+            if entry.normalized_timestamp is not None
+        ]
+        return min(all_timestamps) if all_timestamps else None
+
+    def _rebuild_axis(self) -> None:
+        """Rebuilds the bottom axis using the current self._display_tz,
+        with its UTC offset computed against the loaded data's own
+        earliest timestamp rather than "now" — this is the actual DST fix.
+        Called whenever the display timezone changes AND whenever new
+        entries are loaded (loading new data can change which reference
+        date is available, which can change a DST zone's correct offset).
+        """
+        reference_dt = self._earliest_reference_dt()
+        offset_seconds = -get_utc_offset_seconds(self._display_tz, reference_dt)
+        new_axis = pg.DateAxisItem(utcOffset=offset_seconds)
+        self.getPlotItem().setAxisItems({"bottom": new_axis})
+        new_axis.setTextPen(pg.mkPen("#4a5a7a"))
+        new_axis.setStyle(tickLength=0)
 
     def set_display_timezone(self, tz_name: str) -> None:
         """Called by MainWindow._on_timezone_changed() so the timeline's
@@ -120,11 +149,8 @@ class TimelineWidget(pg.PlotWidget):
         Rebuilds the bottom axis in place rather than recreating the whole
         PlotWidget, so existing scatter/link items are left untouched.
         """
-        offset_seconds = -self._tz_offset_seconds(tz_name)
-        new_axis = pg.DateAxisItem(utcOffset=offset_seconds)
-        self.getPlotItem().setAxisItems({"bottom": new_axis})
-        new_axis.setTextPen(pg.mkPen("#4a5a7a"))
-        new_axis.setStyle(tickLength=0)
+        self._display_tz = tz_name
+        self._rebuild_axis()
 
     # -- Public API --------------------------------------------------------------
 
@@ -135,6 +161,10 @@ class TimelineWidget(pg.PlotWidget):
         drive both charts from the same call site.
         """
         self._entries_by_source = entries_by_source
+        # Recompute the axis offset before redrawing rows — newly loaded
+        # data can change the earliest available reference date, which can
+        # change a DST-observing zone's correct offset (see _rebuild_axis).
+        self._rebuild_axis()
         self._redraw_rows(colors)
 
     def set_links(self, correlated_events: list[dict], display_tz: str = "Asia/Dubai") -> None:

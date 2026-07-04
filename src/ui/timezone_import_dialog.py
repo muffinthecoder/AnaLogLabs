@@ -12,13 +12,13 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QVBoxLayout, QLabel, QComboBox,
 )
 
-_TIMEZONE_OPTIONS: list[tuple[str, str]] = [
-    ("Asia/Dubai",      "Dubai (GST, UTC+4)"),
-    ("Asia/Singapore",  "Singapore (SGT, UTC+8)"),
-    ("Australia/Perth", "Perth (AWST, UTC+8)"),
-]
-_LABEL_TO_IANA = {label: iana for iana, label in _TIMEZONE_OPTIONS}
-_DISPLAY_LABELS = [label for _, label in _TIMEZONE_OPTIONS]
+from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, display_label_for_timezone
+
+# Phase 1: options now come from timezone_map.SUPPORTED_TIMEZONES (9 zones)
+# instead of a hardcoded 3-entry list, and the combo stores each entry's IANA
+# string as userData rather than requiring a label round-trip — three of the
+# new zones (Adelaide, Melbourne, Sydney) observe DST, so their display label
+# alone is not a safe/unique key to parse a fixed offset back out of.
 
 
 class TimezoneImportDialog(QDialog):
@@ -57,7 +57,12 @@ class TimezoneImportDialog(QDialog):
         layout.addWidget(header)
 
         self._combo = QComboBox()
-        self._combo.addItems(_DISPLAY_LABELS)
+        # No log data is loaded yet when this dialog is shown, so
+        # display_label_for_timezone() falls back to "now" for DST zones'
+        # UTC offset here — correct, DST-aware per-panel offsets are
+        # computed later, once actual entry timestamps exist to anchor to.
+        for iana_tz in SUPPORTED_TIMEZONES:
+            self._combo.addItem(display_label_for_timezone(iana_tz), userData=iana_tz)
         self._combo.setMinimumWidth(260)
         layout.addWidget(self._combo)
 
@@ -68,8 +73,7 @@ class TimezoneImportDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_accepted(self) -> None:
-        label = self._combo.currentText()
-        self.display_timezone = _LABEL_TO_IANA.get(label, "Asia/Dubai")
+        self.display_timezone = self._combo.currentData() or "Asia/Dubai"
         # Populate timezone_assignments so MainWindow's existing loop
         # (`for file_path, iana_tz in dialog.timezone_assignments.items()`)
         # still runs without errors — but these values are now the DISPLAY

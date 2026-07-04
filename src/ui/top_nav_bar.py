@@ -5,21 +5,26 @@ Controls (per design doc table):
     AnaLog Labs logo  — static label, branding only
     Import logs       — primary button, opens native OS file dialog
     Sync scroll        — toggle button
-    Time zone          — dropdown: Perth | Singapore | Dubai
+    Time zone          — dropdown: Perth | Singapore | Dubai | UTC | Adelaide |
+                         Darwin | Brisbane | Melbourne | Sydney (Phase 1)
     Session status      — status indicator (logs loaded count + active dot)
 
 Owned by: Fatima
 
+Phase 1 note: the dropdown now sources its options from
+src.normaliser.timezone_map.SUPPORTED_TIMEZONES instead of a hardcoded local
+list, so every timezone the rest of the app understands is guaranteed to
+appear here too — adding a zone only ever requires editing timezone_map.py.
+Each entry's underlying IANA string (e.g. "Australia/Sydney") is stored as
+the QComboBox item's userData rather than parsed back out of the display
+label, since three of the new zones observe DST and therefore don't have a
+single fixed "UTC+X" that could safely be baked into a static label string.
 """
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QComboBox, QFrame
 
-TIMEZONE_OPTIONS = [
-    "Dubai (GST, UTC+4)",
-    "Singapore (SGT, UTC+8)",
-    "Perth (AWST, UTC+8)",
-]
+from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, display_label_for_timezone
 
 
 class TopNavBar(QWidget):
@@ -61,8 +66,16 @@ class TopNavBar(QWidget):
         layout.addWidget(tz_label)
 
         self.timezone_dropdown = QComboBox()
-        self.timezone_dropdown.addItems(TIMEZONE_OPTIONS)
-        self.timezone_dropdown.currentTextChanged.connect(self.timezone_changed.emit)
+        # Populated from SUPPORTED_TIMEZONES so this list can never drift out
+        # of sync with what the rest of the app (parsing, normalisation,
+        # display) actually supports. No log data is loaded yet at this
+        # point, so display_label_for_timezone() falls back to "now" for its
+        # UTC offset here — a DST zone's badge will be recomputed correctly
+        # per-panel once real data exists (see LogWindowWidget.set_display_
+        # timezone / MainWindow._on_timezone_changed).
+        for iana_tz, _country_name in SUPPORTED_TIMEZONES.items():
+            self.timezone_dropdown.addItem(display_label_for_timezone(iana_tz), userData=iana_tz)
+        self.timezone_dropdown.currentIndexChanged.connect(self._on_timezone_index_changed)
         layout.addWidget(self.timezone_dropdown)
 
         layout.addStretch()
@@ -82,6 +95,16 @@ class TopNavBar(QWidget):
         sep.setFixedWidth(1)
         sep.setStyleSheet("background-color: #2a3050;")
         layout.addWidget(sep)
+
+    def _on_timezone_index_changed(self, index: int) -> None:
+        """Emits the IANA timezone string (e.g. "Australia/Sydney") rather
+        than the display label — see the module docstring's Phase 1 note on
+        why the label can no longer be parsed back into an IANA string for
+        the DST-observing zones.
+        """
+        iana_tz = self.timezone_dropdown.itemData(index)
+        if iana_tz:
+            self.timezone_changed.emit(iana_tz)
 
     def _on_sync_toggled(self, checked: bool) -> None:
         self.sync_scroll_button.setObjectName("ToggleActive" if checked else "")
