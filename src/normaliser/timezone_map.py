@@ -110,14 +110,22 @@ def utc_offset_label(iana_timezone: str, at: datetime | None = None) -> str:
     """Returns a compact current UTC-offset badge for a zone, e.g. "UTC+8"
     or "UTC+9:30".
 
-    Computed against `at` (defaults to now) so DST-observing zones report
-    their currently-effective offset. Used for the per-panel timezone badge
-    and the dropdown so the investigator always sees the live offset (R3).
+    Computed against `at` — a UTC instant (defaults to now) — so DST-observing
+    zones (Sydney, Melbourne, Adelaide) report the offset that actually applied
+    to THAT data's date, e.g. UTC+11 for a January Sydney log vs UTC+10 for a
+    July one. MainWindow passes each panel's earliest entry time as `at`.
     """
     try:
         import pytz
         tz = pytz.timezone(iana_timezone)
-        offset = tz.utcoffset(at or datetime.now())
+        # Resolve the offset at the given UTC instant via astimezone(), which
+        # picks the correct DST rule for that date — pytz.utcoffset(dt) alone
+        # is unreliable for aware datetimes.
+        if at is None:
+            at = datetime.now(pytz.UTC)
+        elif at.tzinfo is None:
+            at = pytz.UTC.localize(at)
+        offset = at.astimezone(tz).utcoffset()
     except Exception:
         return "UTC"
 

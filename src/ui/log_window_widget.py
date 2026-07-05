@@ -12,8 +12,8 @@ Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
 """
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QAction, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QColor, QAction, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
     QHeaderView, QPushButton, QAbstractItemView, QMenu, QApplication,
@@ -67,6 +67,13 @@ class LogWindowWidget(QWidget):
         self.color_hex = color_hex
         self.scroll_position = 0
         self.matched_indices: list[int] = []
+
+        # Guard flag used to skip OUR OWN _on_scroll() handler during a
+        # code-driven scroll (receive_sync_scroll), WITHOUT scrollbar.
+        # blockSignals(True) — that would also block Qt's own internal wiring
+        # that moves the visible rows to match the scrollbar, so the handle
+        # would jump while the rows on screen never did.
+        self._suppress_scroll_signal = False
 
         self._build_ui(columns)
 
@@ -223,12 +230,11 @@ class LogWindowWidget(QWidget):
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._on_context_menu)
 
-        # Copy support — Ctrl+C copies the selected cell so the investigator can
-        # paste a timestamp straight into the time-range boxes. On the CONVERTED
-        # TIMESTAMP column it copies the full display date+time (paste-ready);
-        # on ORIGINAL LOG TIME it copies the raw value; elsewhere the cell text.
-        copy_shortcut = QShortcut(QKeySequence.Copy, self.table_view)
-        copy_shortcut.activated.connect(self._copy_selection)
+        # Copy support (reliable): Ctrl+C is caught via an event filter on the
+        # table view — a QShortcut with no explicit context can fail to fire in
+        # an MDI/reparented panel, which is why the earlier copy didn't work.
+        # The event filter only reacts when THIS table actually has focus.
+        self.table_view.installEventFilter(self)
 
         # Sync scroll: a scrollbar move emits `scrolled`, which the unified
         # LockedWorkspace listens to (reading this panel's CENTER timestamp and
@@ -317,8 +323,15 @@ class LogWindowWidget(QWidget):
 
     def receive_sync_scroll(self, row_index: int) -> None:
         """Called by ScrollSyncManager — scrolls this panel to row_index
-        WITHOUT emitting the scrolled signal, preventing recursive sync
-        loops (Section 4.7.3 step 4).
+        WITHOUT re-triggering sync (Section 4.7.3 step 4).
+
+        Uses the `_suppress_scroll_signal` guard rather than
+        scrollbar.blockSignals(True): blockSignals silences EVERY slot on the
+        scrollbar's valueChanged — including Qt's own internal wiring that
+        moves the visible rows to match the scrollbar value — so the handle
+        jumped while the content on screen never did. The guard flag only
+        short-circuits our own _on_scroll(), leaving Qt's scroll-the-viewport
+        connection intact.
         """
         if not self.table_model.rowCount():
             return
@@ -329,23 +342,17 @@ class LogWindowWidget(QWidget):
         # what actually guards against an out-of-range row_index.
         row_index = max(0, min(row_index, self.table_model.rowCount() - 1))
 
-        # Block the scroll signal so ScrollSyncManager doesn't pick this up
-        # as a new user-initiated scroll and trigger another sync round —
-        # the same recursion the docstring above warns about.
-        scrollbar = self.table_view.verticalScrollBar()
-        scrollbar.blockSignals(True)
+        self._suppress_scroll_signal = True
         try:
             index = self.table_model.index(row_index, 0)
-            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
-            self.scroll_position = scrollbar.value()
-            # _on_scroll() is what normally calls this, but it's skipped
-            # here since blockSignals(True) prevents it from firing — so
-            # the slider/timestamp label need updating directly, or they'd
-            # drift out of sync with the table every time another panel's
-            # scroll drives this one via ScrollSyncManager.
+            # Center-aligned, matching _on_scroll's center anchor: the row a
+            # sync moves TO should land at the same center point it was read
+            # from, not the top edge.
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.scroll_position = row_index
             self._update_scroll_indicator(row_index)
         finally:
-            scrollbar.blockSignals(False)
+            self._suppress_scroll_signal = False
 
     def set_flag_anchors(self, anchors: list) -> None:
         """Section 4.2 — apply the shared ±30s flag anchors to this window's
@@ -403,108 +410,83 @@ class LogWindowWidget(QWidget):
             self.row_selected.emit(entry)
 
     def _on_context_menu(self, pos) -> None:
-        """Section 4.2 — right-click flag menu for the row under the cursor.
-        Emits the entry so MainWindow can add/remove a shared ±30s anchor;
-        this window does not toggle its own state directly.
+        """Right-click menu for the row under the cursor. Shows TWO actions:
+        Copy timestamp and Flag (Section 4.2). Right-clicking selects the row
+        first so both actions operate on the row that was actually clicked.
         """
         index = self.table_view.indexAt(pos)
         if not index.isValid():
             return
+        self.table_view.selectRow(index.row())
         entry = self.table_model.entry_at(index.row())
         if entry is None:
             return
+
+        menu = QMenu(self)
+        copy_action = QAction("Copy timestamp", self)
+        menu.addAction(copy_action)
 
         already = self.table_model._is_flagged_row(index.row())
-        menu = QMenu(self)
-        label = "⚑ Remove flag (±30s)" if already else "⚑ Flag event (+ correlate ±30s)"
-        action = QAction(label, self)
-        menu.addAction(action)
+        flag_label = "⚑ Remove flag (±30s)" if already else "⚑ Flag event (+ correlate ±30s)"
+        flag_action = QAction(flag_label, self)
+        menu.addAction(flag_action)
 
         chosen = menu.exec(self.table_view.viewport().mapToGlobal(pos))
-        if chosen is action:
+        if chosen is copy_action:
+            self._copy_timestamp(entry)
+        elif chosen is flag_action:
             self.flag_toggle_requested.emit(entry)
 
-    def _copy_selection(self) -> None:
-        """Ctrl+C — copy the current cell to the clipboard. Timestamps are
-        copied in a paste-ready form for the time-range boxes.
+    def eventFilter(self, obj, event) -> bool:
+        """Catches Ctrl+C (the platform copy shortcut) while the table view has
+        focus and copies the selected row's timestamp. Every other event is
+        passed through so normal table navigation still works.
         """
-        index = self.table_view.currentIndex()
-        if not index.isValid():
-            return
-        entry = self.table_model.entry_at(index.row())
-        if entry is None:
-            return
-        column_key = self.table_model.column_key_at(index.column())
-        if column_key == "timestamp":
-            text = self.table_model.full_display_datetime(entry)
-        elif column_key == "original_log_time":
-            text = entry.raw_timestamp
-        else:
-            text = self.table_model.data(index, Qt.DisplayRole) or ""
-        QApplication.clipboard().setText(str(text))
+        if obj is self.table_view and event.type() == QEvent.KeyPress:
+            if event.matches(QKeySequence.Copy):
+                self._copy_current_row_timestamp()
+                return True
+        return super().eventFilter(obj, event)
 
-    def center_on_row(self, row: int) -> None:
-        """Programmatically centre `row` in the viewport WITHOUT emitting the
-        scrolled signal — used by the unified locked view to align this panel
-        to a target timestamp. blockSignals() on the scrollbar prevents this
-        programmatic move from being mistaken for a user scroll (recursion).
-        """
-        if not self.table_model.rowCount():
-            return
-        row = max(0, min(row, self.table_model.rowCount() - 1))
-        scrollbar = self.table_view.verticalScrollBar()
-        scrollbar.blockSignals(True)
-        try:
-            index = self.table_model.index(row, 0)
-            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
-            self.scroll_position = scrollbar.value()
-            self._update_scroll_indicator(row)
-        finally:
-            scrollbar.blockSignals(False)
-
-    def visible_center_time(self):
-        """UTC epoch seconds of the timestamp at the CENTER of the viewport
-        (sync on the centre row, not the top row). Falls back to the midpoint
-        of the visible rows when the exact centre pixel lands on empty space.
-        """
-        table = self.table_view
-        viewport = table.viewport()
-        centre = viewport.rect().center()
-        row = table.indexAt(centre).row()
-        if row < 0:
-            top = table.rowAt(0)
-            bottom = table.rowAt(viewport.height() - 1)
-            if top >= 0 and bottom >= 0:
-                row = (top + bottom) // 2
-            elif top >= 0:
-                row = top
-            else:
-                row = bottom
+    def _copy_current_row_timestamp(self) -> None:
+        """Ctrl+C path — copy the currently selected/current row's timestamp."""
+        selected = self.table_view.selectionModel().selectedRows()
+        row = selected[0].row() if selected else self.table_view.currentIndex().row()
         entry = self.table_model.entry_at(row) if row >= 0 else None
-        if entry is not None and entry.normalized_timestamp is not None:
-            return entry.normalized_timestamp.utc_datetime.timestamp()
-        return None
+        if entry is not None:
+            self._copy_timestamp(entry)
+
+    def _copy_timestamp(self, entry: RawLogEntry) -> None:
+        """Copies the row's CONVERTED timestamp as a full, paste-ready
+        "YYYY-MM-DD HH:MM:SS.mmm" (display timezone) to the clipboard, so it
+        drops straight into the time-range Start/End boxes. Read-only — never
+        touches highlight/flag state.
+        """
+        QApplication.clipboard().setText(self.table_model.full_display_datetime(entry))
 
     def _on_scroll(self, value: int) -> None:
-        """Fires on every vertical scrollbar movement (mouse wheel, drag,
-        or programmatic). `value` here is the scrollbar's own internal
-        unit (roughly "pixels scrolled", not a row index), so it has to be
-        converted via rowAt() before it means anything to LogTableModel or
-        ScrollSyncManager.
+        """Fires on every vertical scrollbar movement (mouse wheel, drag, or
+        programmatic). The sync anchor is the row visible at the CENTER of the
+        viewport, not the topmost row — different sources pack very different
+        row counts into the same time span, so anchoring on what's centered on
+        screen keeps what the investigator is actually looking at aligned
+        across panels.
         """
-        top_row = self.table_view.rowAt(0)
-        if top_row == -1:
-            # rowAt(0) returns -1 if no row currently occupies the very top
-            # pixel of the viewport (e.g. the table is empty, or — on some
-            # platforms — briefly during a resize/layout pass). Falling
-            # back to the last known good scroll_position avoids feeding a
-            # bogus -1 row index into ScrollSyncManager or the indicator
-            # below.
-            top_row = self.scroll_position
+        if self._suppress_scroll_signal:
+            # A code-driven scroll (receive_sync_scroll) already updates
+            # scroll_position/the indicator itself and must not re-emit.
+            return
 
-        self.scroll_position = top_row
-        self._update_scroll_indicator(top_row)
-        self.scrolled.emit(self.source_label, top_row)
+        center_point = self.table_view.viewport().rect().center()
+        center_row = self.table_view.indexAt(center_point).row()
+        if center_row == -1:
+            center_row = self.table_view.rowAt(0)
+        if center_row == -1:
+            center_row = self.scroll_position
+
+        self.scroll_position = center_row
+        self._update_scroll_indicator(center_row)
+        self.scrolled.emit(self.source_label, center_row)
 
     def _update_scroll_indicator(self, row: int) -> None:
         """Keeps the bottom "Scroll position" slider and timestamp label in

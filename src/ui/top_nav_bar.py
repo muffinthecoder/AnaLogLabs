@@ -127,6 +127,24 @@ class TopNavBar(QWidget):
     def current_display_timezone(self) -> str:
         return self.display_tz_dropdown.currentData() or DEFAULT_TIMEZONE
 
+    def set_display_timezone(self, iana_tz: str) -> None:
+        """Programmatically reflects an externally-chosen display timezone in
+        the "Convert to" dropdown — used after the investigator picks a
+        timezone in TimezoneImportDialog at import time, so the dropdown
+        doesn't silently disagree with what was just chosen.
+
+        Signals are blocked while setting the index: this method is called
+        FROM the import flow (which already applies the chosen timezone
+        directly via MainWindow._on_display_tz_changed), so letting the
+        dropdown's own currentIndexChanged fire here would just re-run that
+        same update a second time for no reason. Selecting the SAME zone
+        already active is a no-op either way (findData returns the already-
+        current index), so this is safe to call unconditionally.
+        """
+        self.display_tz_dropdown.blockSignals(True)
+        self._select(self.display_tz_dropdown, iana_tz)
+        self.display_tz_dropdown.blockSignals(False)
+
     def force_sync_off(self) -> None:
         """Reset the sync toggle to OFF without emitting toggled — used after
         the "please enter a time range" prompt to undo the user's press.

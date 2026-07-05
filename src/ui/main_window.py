@@ -18,11 +18,11 @@ data/application layers.
 import sys
 from datetime import timedelta
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox,
+    QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox, QDialog,
 )
 
 from src.ui.styles import MAIN_STYLESHEET
@@ -34,6 +34,7 @@ from src.ui.visualization_row import VisualizationRow
 from src.ui.floating_log_window import FloatingLogWindow
 from src.ui.locked_workspace import LockedWorkspace
 from src.ui.color_map import SourceColorMap
+from src.ui.timezone_import_dialog import TimezoneImportDialog
 
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
 
         # Default display/convert-to timezone = Perth (the client's primary
         # zone; matches the "+8" converted times in the reference screenshot).
+        # Overridden per-import once the investigator confirms a choice in
+        # TimezoneImportDialog (see _on_import_logs).
         self._display_tz = DEFAULT_TIMEZONE
 
         self.log_panels: dict[str, LogWindowWidget] = {}
@@ -190,6 +193,21 @@ class MainWindow(QMainWindow):
         if not file_paths:
             return
 
+        # Ask which timezone the investigator wants to VIEW timestamps in for
+        # this import. This was previously missing from the import flow
+        # entirely — files were parsed straight away and the app silently
+        # kept whatever display timezone happened to already be selected
+        # (Perth, by default). The dialog itself doesn't change how raw
+        # timestamps are PARSED (that rule — "Z" suffix = UTC, no "Z" =
+        # Perth — is fixed in TimestampNormalizer and applies regardless of
+        # this choice); it only sets how already-normalised UTC values are
+        # rendered afterward.
+        dialog = TimezoneImportDialog(file_paths, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return  # investigator cancelled; do not import
+
+        chosen_tz = dialog.display_timezone
+
         results = LogParser.parse_files(file_paths)
         skipped_total = 0
         duplicates = []
@@ -235,8 +253,23 @@ class MainWindow(QMainWindow):
             print(f"[ingestion] {skipped_total} row(s) skipped this import "
                   f"(unparseable/missing timestamp).")
 
+        # Apply the investigator's chosen display timezone to everything —
+        # existing panels, charts, event detail, AND the newly-added panels
+        # above (add_log_panel() already reads self._display_tz for those,
+        # so it must be set BEFORE _apply_sort()/_refresh_visualization()
+        # run below, not just at the very end of this method).
+        if chosen_tz != self._display_tz:
+            self._on_display_tz_changed(chosen_tz)
+        # Reflect the choice back on the "Convert to" dropdown so it never
+        # silently disagrees with what was just confirmed in the dialog.
+        self.top_nav.set_display_timezone(chosen_tz)
+
         # Newest-first (or the current sort) is applied to every panel.
         self._apply_sort()
+        # DST-aware timezone badges (computed from each panel's own data date)
+        # — panels now have rows loaded, so the offset is accurate.
+        for panel in self.log_panels.values():
+            panel.set_timezone_label(self._badge_label_for_panel(self._display_tz, panel))
         self._apply_flag_anchors()
         self._refresh_visualization()
         if self._last_config is not None:
@@ -252,6 +285,9 @@ class MainWindow(QMainWindow):
         panel.restore_size_requested.connect(self._on_restore_size_requested)
         panel.detach_requested.connect(self._on_detach_requested)
         panel.flag_toggle_requested.connect(self._on_flag_toggle)
+        # Feature 3 — a scroll on any panel drives ScrollSyncManager (only acts
+        # while Sync Scroll is on).
+        panel.scrolled.connect(self._on_panel_scrolled)
 
         panel.set_display_timezone(self._display_tz)
         panel.set_timezone_label(utc_offset_label(self._display_tz))
@@ -292,13 +328,26 @@ class MainWindow(QMainWindow):
         self.left_panel.timeframe_selector.set_timezone(iana_tz)
         self.visualization_row.set_display_timezone(iana_tz)
         self.event_detail_panel.set_display_timezone(iana_tz)
-        badge = utc_offset_label(iana_tz)
         for panel in self.log_panels.values():
-            panel.set_timezone_label(badge)
+            # DST-aware badge computed from each panel's own data date.
+            panel.set_timezone_label(self._badge_label_for_panel(iana_tz, panel))
             panel.set_display_timezone(iana_tz)
         # The investigation window is an ABSOLUTE (UTC) window, so switching the
         # display timezone only changes how times are shown — the same events
         # stay highlighted. Nothing to re-filter here.
+
+    def _badge_label_for_panel(self, iana_tz: str, panel: LogWindowWidget) -> str:
+        """Feature 2 — the "UTC+X" badge for one panel, computed against that
+        panel's OWN earliest entry rather than "now", so DST-observing zones
+        (Sydney/Melbourne/Adelaide) show the offset that actually applied to
+        that log's dates. Falls back to "now" if the panel has no entries yet.
+        """
+        reference_dt = None
+        for entry in panel.table_model.get_entries():
+            if entry.normalized_timestamp is not None:
+                reference_dt = entry.normalized_timestamp.utc_datetime
+                break
+        return utc_offset_label(iana_tz, reference_dt)
 
     # -- Sort ----------------------------------------------------------------------
 
@@ -406,8 +455,8 @@ class MainWindow(QMainWindow):
         for source_label in list(self.floating_windows.keys()):
             self._on_redock_requested(source_label)
         # Pull every panel out of its MDI sub-window; the locked view reparents
-        # them side-by-side under one shared scrollbar and they can no longer
-        # be dragged until sync scroll is turned off.
+        # them side-by-side ("straight line") and they can no longer be dragged
+        # until sync scroll is turned off.
         for source_label, sub in list(self.log_subwindows.items()):
             panel = self.log_panels[source_label]
             panel.setParent(None)
@@ -417,14 +466,11 @@ class MainWindow(QMainWindow):
 
         self._locked_workspace.set_panels(self.log_panels)
         self.workspace_stack.setCurrentWidget(self._locked_workspace)
-
-        # Initial positioning — align ALL panels to the highlighted range START,
-        # each snapping to its nearest available timestamp.
-        if self._last_config is not None:
-            self._locked_workspace.align_to_datum(self._last_config.start_time)
+        self._register_all_for_sync()
 
     def _exit_lock_mode(self) -> None:
         self._locked = False
+        self._scroll_sync.clear()
         panels = self._locked_workspace.release_panels()
         self.workspace_stack.setCurrentWidget(self.panels_area)
         for source_label, panel in panels.items():
@@ -434,8 +480,29 @@ class MainWindow(QMainWindow):
     def _rebuild_locked_workspace(self) -> None:
         self._locked_workspace.release_panels()
         self._locked_workspace.set_panels(self.log_panels)
+        self._register_all_for_sync()
+
+    def _register_all_for_sync(self) -> None:
+        """Register every open panel with ScrollSyncManager and snap them all
+        to the highlighted range START. Deferred one event-loop tick so the
+        just-reparented panels have a laid-out viewport before scrollTo runs.
+        """
+        self._scroll_sync.clear()
+        for source_label, panel in self.log_panels.items():
+            self._scroll_sync.register_window(source_label, panel)
         if self._last_config is not None:
-            self._locked_workspace.align_to_datum(self._last_config.start_time)
+            start = self._last_config.start_time
+            QTimer.singleShot(0, lambda: self._scroll_sync.move_all_to_timestamp(start))
+
+    def _on_panel_scrolled(self, source_label: str, center_row: int) -> None:
+        """A panel was scrolled — while locked, drive the others to the same
+        timestamp via ScrollSyncManager (Feature 3). No-op when not locked.
+        """
+        if not self._locked:
+            return
+        panel = self.log_panels.get(source_label)
+        if panel is not None:
+            self._scroll_sync.sync_scroll(panel, center_row)
 
     # -- Row / tab interaction -----------------------------------------------------
 

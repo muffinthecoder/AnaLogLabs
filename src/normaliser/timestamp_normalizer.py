@@ -12,6 +12,25 @@ Fixes applied for real log data (Week 1 integration):
     - Both of these were the bugs Pooja's test_real_data.py was hitting
       because _NORMALIZER_AVAILABLE was True on her machine but the
       normalizer rejected valid timestamps.
+
+Follow-up fix (this revision):
+    - The "Z suffix = UTC" rule previously only held when pandas was
+      installed (_try_pandas_aware was the only code path that recognised
+      it). If pandas was unavailable, a "...Z" timestamp fell through to the
+      plain strptime format chain, which still contained
+      "%Y-%m-%dT%H:%M:%SZ"-style entries — but strptime treats a literal "Z"
+      in a format string as text to match, NOT a timezone marker, so that
+      "successful" parse actually produced a NAIVE datetime, which then got
+      silently localised to source_tz (Perth) instead of being treated as
+      UTC. That shifted every Z-suffixed timestamp by up to 8 hours with no
+      error, purely depending on whether pandas happened to be present on
+      whatever machine ran the app. _try_stdlib_aware() below makes the
+      "Z = UTC" rule (and numeric-offset recognition) hold unconditionally,
+      using only the standard library, with pandas now purely an
+      enhancement for exotic/ambiguous naive formats rather than the sole
+      source of correctness for the most common, safety-critical case. The
+      dead/dangerous Z-suffix entries have been removed from _FORMAT_CHAIN
+      entirely so there is no trap left for a Z-suffixed string to fall into.
 """
 
 import re
@@ -20,11 +39,12 @@ from datetime import datetime
 
 import pytz
 
-# pandas gives us robust, format-flexible timestamp parsing AND automatic
-# detection of timestamps that already carry a timezone offset (R2 "use pandas"
-# + "check if auto detect can work"). It's imported defensively so the
-# strptime-based format chain below still works even if pandas is unavailable
-# on a given machine — pandas is only ever used as an enhancement/fallback.
+# pandas gives us robust, format-flexible timestamp parsing for exotic/naive
+# formats not covered by the explicit chains below (R2 "use pandas"). It's
+# imported defensively so parsing still works even if pandas is unavailable
+# on a given machine — pandas is only ever used as a LAST-RESORT enhancement,
+# never as the sole path for recognising an explicit "Z"/offset timezone
+# marker (see _try_stdlib_aware below for why that distinction matters).
 try:
     import pandas as pd
     _PANDAS_AVAILABLE = True
@@ -55,29 +75,23 @@ class TimestampParseError(Exception):
 # ---------------------------------------------------------------------------
 # Format chain — Section 4.7.5 step 1, extended for real log data.
 #
-# IMPORTANT ordering rules:
-#   1. Z-suffix variants must come BEFORE their non-Z counterparts, because
-#      strptime will fail on "2026-03-25T03:24:52Z" if you try the no-Z
-#      format first — it would consume "2026-03-25T03:24:52" and leave "Z"
-#      unconsumed, raising ValueError. So Z-first is correct.
-#   2. Microsecond variants must come before second-only variants for the
-#      same reason (parsing "...52.123" with the no-ms format truncates).
-#   3. WLC syslog ("Mar 25 09:30:14") has no year component. We handle this
-#      with a pre-processing step in normalize_timestamp() below — see the
-#      _parse_syslog_ts() helper.
+# NOTE: Z-suffix and numeric-offset formats are intentionally NOT in this
+# chain — they are handled exclusively (and correctly) by _try_stdlib_aware()
+# / _try_pandas_aware() in Step 0, before this chain ever runs. Adding a
+# "%Y-%m-%dT%H:%M:%SZ"-style entry here would be actively dangerous: strptime
+# treats a literal "Z" in a format string as text to match, not a timezone
+# marker, so it would silently produce a NAIVE result that gets localised to
+# source_tz — which is exactly the bug this revision removes.
+#
+# IMPORTANT ordering rule that still applies: microsecond variants must come
+# before second-only variants, or parsing "...52.123" with the no-ms format
+# truncates.
 # ---------------------------------------------------------------------------
 
 _FORMAT_CHAIN = [
-    # ── ISO 8601 — Z-suffix (files 2–8: all Azure sign-in CSVs) ───────────
-    "%Y-%m-%dT%H:%M:%S.%fZ",   # ISO 8601 with microseconds + Z
-    "%Y-%m-%dT%H:%M:%SZ",      # ISO 8601 without microseconds + Z
-
-    # ── ISO 8601 — no Z suffix ─────────────────────────────────────────────
+    # ── ISO 8601 — naive (no timezone marker) ─────────────────────────────
     "%Y-%m-%dT%H:%M:%S.%f",    # ISO 8601 with microseconds
     "%Y-%m-%dT%H:%M:%S",       # ISO 8601 without microseconds
-
-    # ── MUPC XLSX (file 6: "2026-03-25T02:59:59.638") ─────────────────────
-    # Already covered by "%Y-%m-%dT%H:%M:%S.%f" above — no extra entry needed.
 
     # ── Common log formats ─────────────────────────────────────────────────
     "%d/%m/%Y %H:%M:%S.%f",    # DD/MM/YYYY with ms
@@ -92,6 +106,20 @@ _FORMAT_CHAIN = [
 _SYSLOG_FORMATS = [
     "%b %d %H:%M:%S %Y",   # "Mar 25 09:30:14 2026" (after year injection)
     "%b  %d %H:%M:%S %Y",  # "Mar  5 09:30:14 2026" (space-padded single-digit day)
+]
+
+# Explicit, stdlib-parseable formats for a NUMERIC UTC offset, e.g.
+# "2026-03-25T03:24:52+04:00" or "...+0400". Deliberately separate from the
+# Z-suffix case (handled by string-slicing in _try_stdlib_aware) since %z
+# does not accept a literal "Z" character.
+_NUMERIC_OFFSET_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+]
+
+_NAIVE_ISO_FORMATS_FOR_Z_STRIP = [
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
 ]
 
 
@@ -136,20 +164,49 @@ def _looks_tz_aware(cleaned: str) -> bool:
     return bool(_TZ_AWARE_RE.search(cleaned))
 
 
+def _try_stdlib_aware(cleaned: str) -> datetime | None:
+    """Pure-stdlib recognition of an explicitly timezone-marked timestamp —
+    either a "Z"/"z" suffix or a numeric "+HH:MM"/"+HHMM"/"+HH" offset.
+
+    This is now the AUTHORITATIVE handler for the "Z = UTC" rule: it does not
+    depend on pandas being installed. pandas (_try_pandas_aware) is tried
+    first purely because it also handles a couple of exotic aware variants
+    stdlib doesn't (e.g. a space instead of "T"), but if pandas is missing OR
+    fails, this function still guarantees a "Z"-suffixed or explicitly-offset
+    timestamp is recognised correctly rather than silently falling through to
+    the naive format chain and being mis-localised to source_tz.
+
+    Returns a timezone-AWARE datetime, or None if `cleaned` doesn't match a
+    recognised aware pattern at all.
+    """
+    if cleaned.endswith("Z") or cleaned.endswith("z"):
+        naive_part = cleaned[:-1]
+        for fmt in _NAIVE_ISO_FORMATS_FOR_Z_STRIP:
+            try:
+                naive_dt = datetime.strptime(naive_part, fmt)
+                return naive_dt.replace(tzinfo=pytz.UTC)
+            except ValueError:
+                continue
+        return None
+
+    for fmt in _NUMERIC_OFFSET_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
 def _try_pandas_aware(cleaned: str) -> datetime | None:
-    """R2 auto-detection: if the raw string ALREADY carries an explicit
-    timezone (an ISO-8601 "Z" or a numeric offset like "+04:00"), let pandas
-    parse it and return the resulting timezone-AWARE datetime.
+    """Secondary/enhancement path for an explicitly timezone-marked
+    timestamp, tried before _try_stdlib_aware() since pandas can recognise a
+    couple of aware variants stdlib's strptime chains above don't (e.g. a
+    space separator instead of "T"). NOT relied upon as the sole handler for
+    the common "Z" case — see _try_stdlib_aware()'s docstring for why.
 
-    Returns None when pandas is unavailable, the string doesn't look tz-aware,
-    it can't be parsed, or the parsed value is naive — in which case the caller
-    falls back to the naive format chain and localises using the assigned
-    source timezone instead.
-
-    This is what fixes the long-standing latent bug where a "...Z" (already
-    UTC) timestamp was being localised a SECOND time to the source zone: an
-    explicit offset now wins over the source-zone assumption, which is the
-    only correct behaviour.
+    Returns None when pandas is unavailable, the string doesn't look
+    tz-aware, it can't be parsed, or the parsed value is naive.
     """
     if not _PANDAS_AVAILABLE or not _looks_tz_aware(cleaned):
         return None
@@ -200,15 +257,16 @@ class TimestampNormalizer:
 
         Args:
             raw_ts:     Timestamp string from the raw log row.
-            source_tz:  IANA timezone string — one of "Australia/Perth",
-                        "Asia/Singapore", "Asia/Dubai".
+            source_tz:  IANA timezone string assumed for timestamps with NO
+                        explicit timezone marker (see module docstring —
+                        defaults to Perth per R2).
 
         Returns:
             NormalizedTimestamp with utc_datetime, milliseconds, source_tz.
 
         Raises:
             TimestampParseError: if raw_ts matches none of the supported formats.
-            ValueError:          if source_tz is not one of the three supported zones.
+            ValueError:          if source_tz is not a supported zone.
         """
         if source_tz not in SUPPORTED_TIMEZONES:
             raise ValueError(
@@ -221,8 +279,13 @@ class TimestampNormalizer:
         # ── Step 0: Auto-detect an embedded timezone (R2) ─────────────────
         # If the raw string already specifies its own offset ("...Z" or
         # "+04:00"), that offset is authoritative — convert straight to UTC
-        # and do NOT re-localise using source_tz.
+        # and do NOT re-localise using source_tz. _try_stdlib_aware() is the
+        # guaranteed-correct handler for this (works with or without
+        # pandas); _try_pandas_aware() is tried first only as an enhancement
+        # for a couple of exotic aware variants stdlib doesn't cover.
         aware_dt = _try_pandas_aware(cleaned)
+        if aware_dt is None:
+            aware_dt = _try_stdlib_aware(cleaned)
         if aware_dt is not None:
             utc_dt = aware_dt.astimezone(pytz.UTC)
             return NormalizedTimestamp(
@@ -232,7 +295,7 @@ class TimestampNormalizer:
                 is_dst_adjusted=False,
             )
 
-        # ── Step 1: Try the main strptime format chain ────────────────────
+        # ── Step 1: Try the main strptime format chain (naive formats only) ─
         parsed_dt: datetime | None = None
         for fmt in _FORMAT_CHAIN:
             try:
@@ -258,6 +321,8 @@ class TimestampNormalizer:
         milliseconds = parsed_dt.microsecond // 1000
 
         # ── Step 3: Attach the source timezone ────────────────────────────
+        # Only reached for a genuinely NAIVE timestamp (no "Z", no numeric
+        # offset — those are both handled and returned in Step 0 above).
         # localize() correctly resolves the DST offset for the DST-observing
         # Australian zones now in SUPPORTED_TIMEZONES; is_dst=False (pytz
         # default) is a safe deterministic choice for the rare ambiguous
