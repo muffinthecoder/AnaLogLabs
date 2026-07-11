@@ -51,13 +51,13 @@ class FloatingLogWindow(QMainWindow):
         tb.setContentsMargins(8, 4, 8, 4)
 
         title = QLabel(f"⧉ {source_label} (floating)")
-        title.setStyleSheet("font-size: 11px; color: #8090b0;")
+        title.setStyleSheet("font-size: 11px; color: #000000;")
         tb.addWidget(title)
         tb.addStretch()
 
         dock_button = QPushButton("Dock back into app")
         dock_button.setStyleSheet(
-            "background-color: transparent; color: #00c4e8; "
+            "background-color: #102120; color: #ffffff; "
             "border: 1px solid #00c4e8; font-size: 10px; "
             "border-radius: 3px; padding: 2px 8px;"
         )

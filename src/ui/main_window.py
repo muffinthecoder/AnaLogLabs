@@ -35,7 +35,8 @@ from src.ui.floating_log_window import FloatingLogWindow
 from src.ui.locked_workspace import LockedWorkspace
 from src.ui.color_map import SourceColorMap
 from src.ui.timezone_import_dialog import TimezoneImportDialog
-
+from src.ui.session_notes import SessionNotesWidget
+from src.ui.toast_notification import ToastNotification
 from src.models.data_classes import FilterConfig, RawLogEntry
 from src.filter.log_filter import LogFilter, FilterValidationError
 from src.parser.log_parser import LogParser
@@ -116,10 +117,8 @@ class MainWindow(QMainWindow):
         self.right_splitter.addWidget(self.visualization_row)
 
         # Log space: MDI workspace (or the locked view) + event detail.
-        log_area = QWidget()
-        log_layout = QVBoxLayout(log_area)
-        log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.setSpacing(0)
+        self.log_splitter = QSplitter(Qt.Vertical)
+        self.log_splitter.setChildrenCollapsible(False)
 
         self.panels_area = QMdiArea()
         self.panels_area.setObjectName("PanelsArea")
@@ -134,15 +133,49 @@ class MainWindow(QMainWindow):
         # unified single-scrollbar locked view (Sync Scroll on).
         self._locked_workspace = LockedWorkspace()
         self.workspace_stack = QStackedWidget()
-        self.workspace_stack.addWidget(self.panels_area)        # index 0
+        self.workspace_stack.addWidget(self.panels_area)  # index 0
         self.workspace_stack.addWidget(self._locked_workspace)  # index 1
-        log_layout.addWidget(self.workspace_stack, stretch=1)
+        self.log_splitter.addWidget(self.workspace_stack)
 
         self.event_detail_panel = EventDetailPanel()
         self.event_detail_panel.set_display_timezone(self._display_tz)
-        log_layout.addWidget(self.event_detail_panel)
+        self.log_splitter.addWidget(self.event_detail_panel)
 
-        self.right_splitter.addWidget(log_area)
+        # Set default proportions so the log area takes up most of the space
+        self.log_splitter.setStretchFactor(0, 1)
+        self.log_splitter.setStretchFactor(1, 0)
+        self.log_splitter.setSizes([700, 200])
+
+        self.right_splitter.addWidget(self.log_splitter)
+        # # Log space: MDI workspace (or the locked view) + event detail.
+        # log_area = QWidget()
+        # log_layout = QVBoxLayout(log_area)
+        # log_layout.setContentsMargins(0, 0, 0, 0)
+        # log_layout.setSpacing(0)
+
+        # self.panels_area = QMdiArea()
+        # self.panels_area.setObjectName("PanelsArea")
+        # self.panels_area.setViewMode(QMdiArea.SubWindowView)
+        # self.panels_area.setOption(QMdiArea.DontMaximizeSubWindowOnActivation, True)
+        # pal = self.panels_area.palette()
+        # pal.setColor(QPalette.Window, QColor(BACKGROUND_COLOR))
+        # self.panels_area.setPalette(pal)
+        # self.panels_area.setBackground(QColor(BACKGROUND_COLOR))
+
+        # # A stacked widget swaps between the movable MDI workspace and the
+        # # unified single-scrollbar locked view (Sync Scroll on).
+        # self._locked_workspace = LockedWorkspace()
+        # self.workspace_stack = QStackedWidget()
+        # self.workspace_stack.addWidget(self.panels_area)        # index 0
+        # self.workspace_stack.addWidget(self._locked_workspace)  # index 1
+        # log_layout.addWidget(self.workspace_stack, stretch=1)
+
+        # self.event_detail_panel = EventDetailPanel()
+        # self.event_detail_panel.set_display_timezone(self._display_tz)
+        # log_layout.addWidget(self.event_detail_panel)
+
+        # self.right_splitter.addWidget(log_area)
+
         self.right_splitter.setStretchFactor(0, 1)
         self.right_splitter.setStretchFactor(1, 2)
         self.right_splitter.setSizes([300, 600])
@@ -154,15 +187,24 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self.main_splitter, stretch=1)
 
+        # Non-blocking action feedback (apply/clear filter, import results,
+        # sync scroll, flags, session notes export, pop-out/redock/close,
+        # timezone changes) — see toast_notification.py. Parented directly to
+        # the QMainWindow (not the central widget) and raised on every show()
+        # so it always floats above whatever panel/log window is underneath.
+        self.toast = ToastNotification(self)
+
     def _connect_signals(self) -> None:
         self.top_nav.import_logs_clicked.connect(self._on_import_logs)
         self.top_nav.display_timezone_changed.connect(self._on_display_tz_changed)
         self.top_nav.sync_scroll_toggled.connect(self._on_sync_scroll_toggled)
 
         self.left_panel.tab_manager.tab_selected.connect(self._on_tab_selected)
+        self.visualization_row.element_clicked.connect(self._on_chart_navigate)
         self.left_panel.sort_changed.connect(self._on_sort_changed)
         self.left_panel.timeframe_selector.filter_applied.connect(self._on_filter_applied)
         self.left_panel.timeframe_selector.filter_cleared.connect(self._on_filter_cleared)
+        self.left_panel.session_notes.notes_exported.connect(self._on_notes_exported)
 
     # -- Layout persistence --------------------------------------------------------
 
@@ -172,7 +214,7 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geo)
         for key, splitter in (("main_splitter", self.main_splitter),
                               ("right_splitter", self.right_splitter),
-                              ("charts_splitter", self.visualization_row.charts_splitter)):
+                              ):
             state = self._settings.value(key)
             if state is not None:
                 splitter.restoreState(state)
@@ -183,6 +225,11 @@ class MainWindow(QMainWindow):
         self._settings.setValue("right_splitter", self.right_splitter.saveState())
         self._settings.setValue("charts_splitter", self.visualization_row.charts_splitter.saveState())
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "toast"):
+            self.toast.reposition()
 
     # -- Import --------------------------------------------------------------------
 
@@ -211,9 +258,12 @@ class MainWindow(QMainWindow):
         results = LogParser.parse_files(file_paths)
         skipped_total = 0
         duplicates = []
+        imported_count = 0
+        failed_count = 0
         for result in results:
             if result.failed:
                 print(f"File error: {result.file_error}")
+                failed_count += 1
                 continue
 
             # Prevent importing the same file twice (keyed on source label).
@@ -240,6 +290,7 @@ class MainWindow(QMainWindow):
             panel = self.add_log_panel(result.source_label, color, columns)
             panel.load_rows(result.valid_entries)
             self._entries_by_source[result.source_label] = result.valid_entries
+            imported_count += 1
 
         if duplicates:
             QMessageBox.information(
@@ -277,6 +328,17 @@ class MainWindow(QMainWindow):
             for panel in self.log_panels.values():
                 panel.scroll_to_time(self._last_config.start_time)
         self._recompute_stats()
+
+        # Summary toast — placed last so it's the final (and therefore
+        # visible, single-slot) feedback for this action, overriding any
+        # earlier "Timezone changed" toast fired above in this same import.
+        if imported_count:
+            noun = "file" if imported_count == 1 else "files"
+            self.toast.show_toast("Logs imported", f"{imported_count} {noun} added", kind="success")
+        elif failed_count and not duplicates:
+            self.toast.show_toast("Import failed", "No valid log files found", kind="warning")
+        elif duplicates and not failed_count:
+            self.toast.show_toast("Already imported", "No new files were added", kind="neutral")
 
     def add_log_panel(self, source_label: str, color_hex: str, columns: list[str]) -> LogWindowWidget:
         panel = LogWindowWidget(source_label=source_label, color_hex=color_hex, columns=columns)
@@ -335,6 +397,7 @@ class MainWindow(QMainWindow):
         # The investigation window is an ABSOLUTE (UTC) window, so switching the
         # display timezone only changes how times are shown — the same events
         # stay highlighted. Nothing to re-filter here.
+        self.toast.show_toast("Timezone changed", f"Now displaying times in {iana_tz}", kind="info")
 
     def _badge_label_for_panel(self, iana_tz: str, panel: LogWindowWidget) -> str:
         """Feature 2 — the "UTC+X" badge for one panel, computed against that
@@ -374,6 +437,11 @@ class MainWindow(QMainWindow):
         # Jump every open window to the start of the range.
         for panel in self.log_panels.values():
             panel.scroll_to_time(config.start_time)
+        self.toast.show_toast(
+            "Filter applied",
+            f"{self._highlighted_count:,} row{'s' if self._highlighted_count != 1 else ''} matched",
+            kind="success",
+        )
 
     def _apply_filter_highlighting(self, config: FilterConfig) -> None:
         """Highlight (ONLY highlight — never flag) rows whose converted time
@@ -409,6 +477,11 @@ class MainWindow(QMainWindow):
         self._highlighted_count = 0
         self.visualization_row.set_investigation_range(None, None)
         self._recompute_stats()
+        self.toast.show_toast("Filter cleared", "Showing the full imported range again", kind="neutral")
+
+    def _on_notes_exported(self, filepath: str) -> None:
+        import os
+        self.toast.show_toast("Session notes exported", os.path.basename(filepath), kind="success")
 
     # -- Flags (manual only) -------------------------------------------------------
 
@@ -420,15 +493,22 @@ class MainWindow(QMainWindow):
         for i, anchor in enumerate(self._flag_anchors):
             if abs((t - anchor).total_seconds()) <= 30:
                 del self._flag_anchors[i]
+                was_added = False
                 break
         else:
             self._flag_anchors.append(t)
+            was_added = True
         self._apply_flag_anchors()
         self._recompute_stats()
+        if was_added:
+            self.toast.show_toast("Flag added", entry.source_label, kind="success")
+        else:
+            self.toast.show_toast("Flag removed", entry.source_label, kind="neutral")
 
     def _apply_flag_anchors(self) -> None:
         for panel in self.log_panels.values():
             panel.set_flag_anchors(self._flag_anchors)
+        self.visualization_row.set_flag_anchors(self._flag_anchors)
 
     # -- Sync scroll → unified time-based lock ------------------------------------
 
@@ -445,9 +525,11 @@ class MainWindow(QMainWindow):
                 self.top_nav.force_sync_off()
                 return
             self._enter_lock_mode()
+            self.toast.show_toast("Sync scroll on", "Every open window now scrolls together", kind="success")
         else:
             if self._locked:
                 self._exit_lock_mode()
+                self.toast.show_toast("Sync scroll off", kind="neutral")
 
     def _enter_lock_mode(self) -> None:
         self._locked = True
@@ -509,6 +591,26 @@ class MainWindow(QMainWindow):
     def _on_row_selected(self, entry: RawLogEntry) -> None:
         self.event_detail_panel.show_event(entry, correlation_count=0)
 
+    def _on_chart_navigate(self, source_label: str, utc_dt) -> None:
+        """Chart click-to-navigate (Section 5.1/5.2 UI interaction) — a click
+        on a heatmap cell, spike-chart segment, or bubble jumps the matching
+        log window to the nearest entry at utc_dt, selects it (which also
+        populates the Event Detail panel via the usual row_selected path),
+        and — if Sync Scroll has windows registered — carries every other
+        open window along to the same timestamp too.
+        """
+        panel = self.log_panels.get(source_label)
+        if panel is not None:
+            panel.select_and_scroll_to_time(utc_dt)
+        elif source_label in self.floating_windows:
+            fw = self.floating_windows[source_label]
+            inner = getattr(fw, "panel", None) or getattr(fw, "chart_widget", None)
+            if inner is not None and hasattr(inner, "select_and_scroll_to_time"):
+                inner.select_and_scroll_to_time(utc_dt)
+
+        if self._scroll_sync.registered_windows:
+            self._scroll_sync.move_all_to_timestamp(utc_dt)
+
     def _on_tab_selected(self, source_label: str) -> None:
         """The file list is display-only: a click does NOT leave a persistent
         highlight (that stuck-highlight was a reported annoyance). It simply
@@ -539,6 +641,7 @@ class MainWindow(QMainWindow):
 
         self._refresh_visualization()
         self._recompute_stats()
+        self.toast.show_toast("Log window closed", source_label, kind="neutral")
 
     def _on_restore_size_requested(self, source_label: str) -> None:
         sub = self.log_subwindows.get(source_label)
@@ -546,6 +649,7 @@ class MainWindow(QMainWindow):
             return
         sub.showNormal()
         sub.resize(480, 380)
+        self.toast.show_toast("Window restored", source_label, kind="info")
 
     # -- Pop-out / dock-back -------------------------------------------------------
 
@@ -569,6 +673,7 @@ class MainWindow(QMainWindow):
         floating.closed.connect(self._on_floating_closed)
         self.floating_windows[source_label] = floating
         floating.show()
+        self.toast.show_toast("Popped out", source_label, kind="info")
 
     def _on_redock_requested(self, source_label: str) -> None:
         floating = self.floating_windows.pop(source_label, None)
@@ -580,6 +685,7 @@ class MainWindow(QMainWindow):
         floating.close()
         self._mount_in_mdi(panel, source_label)
         self._auto_tile()
+        self.toast.show_toast("Docked back", source_label, kind="info")
 
     def _on_floating_closed(self, source_label: str) -> None:
         self._on_panel_closed(source_label)

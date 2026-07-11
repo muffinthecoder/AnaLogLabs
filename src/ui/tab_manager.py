@@ -14,6 +14,9 @@ Owned by: Fatima
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QClipboard, QAction
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QMenu, QApplication
 
 class LogTab(QFrame):
     """A single clickable tab entry representing one loaded log source."""
@@ -86,7 +89,28 @@ class TabManager(QWidget):
         title = QLabel("LOG SOURCES")
         title.setProperty("class", "SectionTitle")
         self.layout_.addWidget(title)
+        # 1. Enable custom context menu policy
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
+    def _show_context_menu(self, pos):
+        # 2. Find which child widget (LogTab) was clicked
+        widget = self.childAt(pos)
+        
+        # Traverse up to find the LogTab parent if a child (like the dot/label) was clicked
+        tab = widget
+        while tab and not isinstance(tab, LogTab):
+            tab = tab.parentWidget()
+            
+        if isinstance(tab, LogTab):
+            menu = QMenu(self)
+            copy_action = QAction("Copy filename", self)
+            copy_action.triggered.connect(
+                lambda: QApplication.clipboard().setText(tab.source_label)
+            )
+            menu.addAction(copy_action)
+            menu.exec(self.mapToGlobal(pos))
+            
     def add_tab(self, source_label: str, color_hex: str) -> None:
         """Section 4.7.1 step 7 — TabManager.add_tab(source_label)."""
         if source_label in self._tabs:

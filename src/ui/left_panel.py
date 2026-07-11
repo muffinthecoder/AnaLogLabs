@@ -8,10 +8,15 @@ QSplitter by MainWindow so its width is user-resizable and persisted.
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
+from torch import layout
 
 from src.ui.timeframe_selector import TimeFrameSelector
 from src.ui.tab_manager import TabManager
-
+from src.ui.session_notes import SessionNotesWidget
+# Add these imports at the top
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QClipboard, QAction
+from PySide6.QtWidgets import QMenu, QApplication
 # Sort options exposed to MainWindow (Section 3). Chronological asc/desc plus
 # by file name, at minimum.
 SORT_TIME_ASC = "time_asc"
@@ -56,6 +61,33 @@ class LeftPanel(QWidget):
         layout.addWidget(self.timeframe_selector)
 
         layout.addStretch()
+        layout.addWidget(self.tab_manager, stretch=1) # Tab manager takes most space
+
+        self.session_notes = SessionNotesWidget()
+        layout.addWidget(self.session_notes)
+
+        # 1. Enable custom context menu on the TabManager
+        self.tab_manager.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tab_manager.customContextMenuRequested.connect(self._show_context_menu)
+    
+    def _show_context_menu(self, pos):
+        # 2. Get the specific tab/item clicked
+        # TabManager likely uses itemAt() or indexAt() to find the tab
+        item = self.tab_manager.itemAt(pos)
+        
+        # If your TabManager uses a list/tree, itemAt might return an object
+        # that has a .text() method
+        if item:
+            menu = QMenu(self)
+            copy_action = QAction("Copy filename", self)
+            
+            # 3. Connect the action to copy the text to the clipboard
+            copy_action.triggered.connect(
+                lambda: QApplication.clipboard().setText(item.text())
+            )
+            
+            menu.addAction(copy_action)
+            menu.exec(self.tab_manager.mapToGlobal(pos))
 
     def current_sort(self) -> str:
         return self.sort_combo.currentData()

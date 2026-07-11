@@ -60,7 +60,13 @@ class TopNavBar(QWidget):
         # ONE display-timezone dropdown ("convert to"). Raw "Z" timestamps are
         # UTC and non-"Z" timestamps are Perth local — that assumption is fixed
         # in the parser, so there is no separate "original timezone" control.
-        layout.addWidget(self._tz_caption("Convert to"))
+        #layout.addWidget(self._tz_caption("Convert to"))
+        convert_label = QLabel("Convert to")
+        
+        # Update its style to pure white (keeping whatever font size is already there)
+        convert_label.setStyleSheet("color: #ffffff; font-size: 12px;") 
+        
+        layout.addWidget(convert_label)
         self.display_tz_dropdown = QComboBox()
         for iana, label in SUPPORTED_TIMEZONES.items():
             self.display_tz_dropdown.addItem(label, iana)
@@ -77,7 +83,8 @@ class TopNavBar(QWidget):
         # Live session stats.
         self.total_label = self._stat_label("Total", "0", "#00c4e8")
         self.highlighted_label = self._stat_label("Highlighted", "0", "#ffd60a")
-        self.flagged_label = self._stat_label("Flagged", "0", "#e8b840")
+        self.flagged_label = self._stat_label("Flagged", "0", "#e8b840")        
+        
         for w in (self.total_label, self.highlighted_label, self.flagged_label):
             layout.addWidget(w)
 
@@ -107,7 +114,7 @@ class TopNavBar(QWidget):
         caption = label.property("caption")
         color = label.property("color")
         label.setText(
-            f"<span style='color:#5a6a8a'>{caption}</span> "
+            f"<span style='color:#ffffff'>{caption}</span> "
             f"<span style='color:{color}; font-weight:600'>{value}</span>"
         )
 
