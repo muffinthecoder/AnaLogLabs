@@ -102,8 +102,30 @@ class ActivityHeatmap(QWidget):
         self._drag_view_start = None
         self._drag_view_end = None
 
+        # Themeable — QPainter reads these at paint time, so unlike the rest
+        # of the app (pure QSS, re-themed for free) these need to be instance
+        # state with a set_theme() that triggers a repaint. Defaults match
+        # what shipped before theme switching existed.
+        self._empty_cell_outline = EMPTY_CELL_OUTLINE
+        self._axis_text_color = AXIS_TEXT_COLOR
+        self._label_text_color = LABEL_TEXT_COLOR
+        self._empty_state_text = EMPTY_STATE_TEXT
+        self._flag_glow_color = FLAG_GLOW_COLOR
+
         self.setMinimumHeight(ROW_HEIGHT + AXIS_HEIGHT + TOP_PAD)
         self.setToolTip("Activity by time of day — brighter = busier (per file). Scroll to zoom, drag to pan.")
+
+    def set_theme(self, theme: dict) -> None:
+        """Applies a theme dict (see theme.py) to this chart's internal
+        QPainter colors — the one part of the app QSS re-theming can't
+        reach, since paintEvent reads Python state, not stylesheet rules.
+        """
+        self._empty_cell_outline = theme["chart_outline"]
+        self._axis_text_color = theme["chart_text_dim"]
+        self._label_text_color = theme["chart_text"]
+        self._empty_state_text = theme["chart_text_dim"]
+        self._flag_glow_color = theme["flag_color"]
+        self.update()
 
     # -- Public API ------------------------------------------------------------
 
@@ -111,6 +133,7 @@ class ActivityHeatmap(QWidget):
         self._entries_by_source = entries_by_source
         self._colors = colors
         self._resize_for_sources()
+        self._apply_auto_zoom()
         self.update()
 
     def clear_chart(self) -> None:
@@ -120,7 +143,13 @@ class ActivityHeatmap(QWidget):
         self.update()
 
     def set_display_timezone(self, tz_name: str) -> None:
+        """Bucket assignment is time-of-day IN this display timezone, so
+        changing it shifts where the data cluster falls on the 0..24 axis —
+        the auto-zoom is recomputed here for the same reason it's computed
+        in set_entries().
+        """
         self._display_tz = tz_name
+        self._apply_auto_zoom()
         self.update()
 
     def set_flag_anchors(self, anchors: list[datetime]) -> None:
@@ -148,6 +177,49 @@ class ActivityHeatmap(QWidget):
             return pytz.timezone(self._display_tz)
         except pytz.UnknownTimeZoneError:
             return pytz.timezone("Australia/Perth")
+
+    def _compute_auto_zoom(self):
+        """Finds the tightest time-of-day window that actually contains
+        activity across every source, in the CURRENT display timezone —
+        so the heatmap opens zoomed into the relevant period instead of a
+        mostly-empty 24h grid. Returns (start_bucket, end_bucket) with a
+        little padding, or None if there's no data (falls back to the full
+        24h view in that case).
+        """
+        tz = self._tz()
+        min_bucket = None
+        max_bucket = None
+        for label in self._valid_sources():
+            for entry in self._entries_by_source.get(label, []):
+                nts = entry.normalized_timestamp
+                if nts is None:
+                    continue
+                local = nts.utc_datetime.astimezone(tz)
+                minute_of_day = local.hour * 60 + local.minute
+                idx = min(minute_of_day // MINUTES_PER_BUCKET, BUCKETS_PER_DAY - 1)
+                if min_bucket is None or idx < min_bucket:
+                    min_bucket = idx
+                if max_bucket is None or idx > max_bucket:
+                    max_bucket = idx
+        if min_bucket is None:
+            return None
+
+        pad = 2  # ~1 hour of breathing room on each side of the actual data
+        start = max(0.0, float(min_bucket - pad))
+        end = min(float(BUCKETS_PER_DAY), float(max_bucket + 1 + pad))
+        if end - start < MIN_VIEW_BUCKETS:
+            center = (start + end) / 2
+            start = max(0.0, center - MIN_VIEW_BUCKETS / 2)
+            end = min(float(BUCKETS_PER_DAY), start + MIN_VIEW_BUCKETS)
+        return start, end
+
+    def _apply_auto_zoom(self) -> None:
+        result = self._compute_auto_zoom()
+        if result is not None:
+            self._view_start, self._view_end = result
+        else:
+            self._view_start = 0.0
+            self._view_end = float(BUCKETS_PER_DAY)
 
     def _effective_view(self):
         """Current zoom/pan window, clamped to the full 0..BUCKETS_PER_DAY axis."""
@@ -198,6 +270,13 @@ class ActivityHeatmap(QWidget):
             "view_start": view_start, "view_end": view_end,
         }
 
+    def _vertical_offset(self, num_sources: int) -> float:
+        """Shared by paintEvent and _hit_test so hover/click accuracy can
+        never drift out of sync with where rows are actually painted.
+        """
+        content_height = TOP_PAD + num_sources * ROW_HEIGHT + AXIS_HEIGHT
+        return max(0.0, (self.height() - content_height) / 2)
+
     def _hit_test(self, pos):
         """Returns ('cell', label, bucket_idx, count) | ('label', label) | None
         for the given widget-local mouse position.
@@ -207,7 +286,8 @@ class ActivityHeatmap(QWidget):
         if not sources:
             return None
 
-        row = int((pos.y() - TOP_PAD) // ROW_HEIGHT)
+        y_offset = self._vertical_offset(len(sources))
+        row = int((pos.y() - y_offset - TOP_PAD) // ROW_HEIGHT)
         if row < 0 or row >= len(sources):
             return None
         label = sources[row]
@@ -361,8 +441,8 @@ class ActivityHeatmap(QWidget):
         L = self._layout()
         sources = L["sources"]
         if not sources:
-            painter.setPen(QColor(EMPTY_STATE_TEXT))
-            painter.drawText(self.rect(), Qt.AlignCenter, "No log data loaded")
+            painter.setPen(QColor(self._empty_state_text))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No logs loaded yet")
             painter.end()
             return
 
@@ -376,17 +456,25 @@ class ActivityHeatmap(QWidget):
         last_bucket = min(BUCKETS_PER_DAY - 1, int(view_end - 1e-9))
 
         painter.setFont(self._small_font())
+
+        # Center the grid+axis block vertically when the panel is taller than
+        # the content actually needs (e.g. the splitter gave this panel more
+        # room than heatmap.setMinimumHeight() asked for) — previously rows
+        # always started at y=0, leaving a dead gap below instead of the
+        # content sitting centered in the space it was given.
+        y_offset = self._vertical_offset(len(sources))
+
         glow_queue = []            # flagged cells -> bright white glow, painted last (on top)
         activity_glow_queue = []   # busy cells -> subtler colored glow, painted first
         for row, label in enumerate(sources):
-            y = TOP_PAD + row * ROW_HEIGHT
+            y = y_offset + TOP_PAD + row * ROW_HEIGHT
             base = QColor(self._colors.get(label, "#4A90D9"))
 
             # Left gutter — colour dot + (truncated) file name.
             painter.setPen(Qt.NoPen)
             painter.setBrush(base)
             painter.drawEllipse(QRectF(4, y + ROW_HEIGHT / 2 - 3, 6, 6))
-            painter.setPen(QColor(LABEL_TEXT_COLOR))
+            painter.setPen(QColor(self._label_text_color))
             painter.drawText(
                 QRectF(16, y, grid_left - 18, ROW_HEIGHT),
                 Qt.AlignVCenter | Qt.AlignLeft,
@@ -415,7 +503,7 @@ class ActivityHeatmap(QWidget):
                 if count == 0:
                     # Faint outline only, so the full 24h grid stays readable
                     # even where there's no activity, instead of vanishing.
-                    painter.setPen(QColor(EMPTY_CELL_OUTLINE))
+                    painter.setPen(QColor(self._empty_cell_outline))
                     painter.setBrush(Qt.NoBrush)
                 else:
                     alpha = MIN_ALPHA + int((MAX_ALPHA - MIN_ALPHA) * (count / rmax))
@@ -444,7 +532,7 @@ class ActivityHeatmap(QWidget):
             for layer in range(GLOW_LAYERS, 0, -1):
                 pad = GLOW_MAX_PAD * (layer / GLOW_LAYERS)
                 glow_alpha = int(70 * (1 - (layer - 1) / GLOW_LAYERS))
-                glow_color = QColor(FLAG_GLOW_COLOR)
+                glow_color = QColor(self._flag_glow_color)
                 glow_color.setAlpha(glow_alpha)
                 painter.setBrush(glow_color)
                 glow_rect = cell.adjusted(-pad, -pad, pad, pad)
@@ -452,8 +540,8 @@ class ActivityHeatmap(QWidget):
 
         # Bottom axis — reflects the CURRENT (possibly zoomed) view rather
         # than always showing fixed 0/6/12/18/24 marks.
-        axis_y = TOP_PAD + len(sources) * ROW_HEIGHT
-        painter.setPen(QColor(AXIS_TEXT_COLOR))
+        axis_y = y_offset + TOP_PAD + len(sources) * ROW_HEIGHT
+        painter.setPen(QColor(self._axis_text_color))
 
         def bucket_to_hhmm(bucket: float) -> str:
             total_minutes = int(bucket * MINUTES_PER_BUCKET)
@@ -472,7 +560,7 @@ class ActivityHeatmap(QWidget):
     @staticmethod
     def _small_font() -> QFont:
         f = QFont()
-        f.setPixelSize(9)
+        f.setPixelSize(10)
         return f
 
     @staticmethod

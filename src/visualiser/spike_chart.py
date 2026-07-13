@@ -87,8 +87,23 @@ class SpikeChart(QWidget):
 
         self._flag_anchors: list[datetime] = []
 
+        self._gridline_color = GRIDLINE_COLOR
+        self._axis_text_color = AXIS_TEXT_COLOR
+        self._empty_state_text = EMPTY_STATE_TEXT
+        self._flag_glow_color = FLAG_GLOW_COLOR
+
         self.setMinimumHeight(80)
         self.setToolTip("Event volume over the investigation range, stacked by file — scroll to zoom, drag to pan")
+
+    def set_theme(self, theme: dict) -> None:
+        """See ActivityHeatmap.set_theme — same reasoning: QPainter colors
+        are Python state, not QSS, so they need an explicit update+repaint.
+        """
+        self._gridline_color = theme["chart_outline"]
+        self._axis_text_color = theme["chart_text_dim"]
+        self._empty_state_text = theme["chart_text_dim"]
+        self._flag_glow_color = theme["flag_color"]
+        self.update()
 
     # -- Public API ------------------------------------------------------------
 
@@ -335,7 +350,7 @@ class SpikeChart(QWidget):
 
         # Section 5.2 — nothing until a range is chosen.
         if self._range_start is None or self._range_end is None or self._range_end <= self._range_start:
-            painter.setPen(QColor(EMPTY_STATE_TEXT))
+            painter.setPen(QColor(self._empty_state_text))
             painter.drawText(self.rect(), Qt.AlignCenter, "Enter a time range to see the spike chart")
             painter.end()
             return
@@ -347,13 +362,13 @@ class SpikeChart(QWidget):
         stacks = L["stacks"]
 
         # Subtle horizontal reference gridlines (quarter / half / three-quarter).
-        painter.setPen(QColor(GRIDLINE_COLOR))
+        painter.setPen(QColor(self._gridline_color))
         for frac in GRIDLINE_FRACTIONS:
             gy = plot_bottom - frac * plot_height
             painter.drawLine(QPointF(plot_left, gy), QPointF(plot_left + plot_width, gy))
 
         # Y scale ticks (0 and max).
-        painter.setPen(QColor(AXIS_TEXT_COLOR))
+        painter.setPen(QColor(self._axis_text_color))
         painter.drawText(QRectF(0, plot_top - 6, LEFT_GUTTER - 4, 12), Qt.AlignRight | Qt.AlignVCenter, str(max_total))
         painter.drawText(QRectF(0, plot_bottom - 12, LEFT_GUTTER - 4, 12), Qt.AlignRight | Qt.AlignVCenter, "0")
 
@@ -404,7 +419,7 @@ class SpikeChart(QWidget):
             for layer in range(GLOW_LAYERS, 0, -1):
                 pad = GLOW_MAX_PAD * (layer / GLOW_LAYERS)
                 glow_alpha = int(80 * (1 - (layer - 1) / GLOW_LAYERS))
-                glow_color = QColor(FLAG_GLOW_COLOR)
+                glow_color = QColor(self._flag_glow_color)
                 glow_color.setAlpha(glow_alpha)
                 painter.setBrush(glow_color)
                 glow_rect = rect.adjusted(-pad, -pad, pad, pad)
@@ -414,7 +429,7 @@ class SpikeChart(QWidget):
         tz = self._tz()
         view_start, view_end = L["view_start"], L["view_end"]
         mid = view_start + (view_end - view_start) / 2
-        painter.setPen(QColor(AXIS_TEXT_COLOR))
+        painter.setPen(QColor(self._axis_text_color))
         painter.drawText(QRectF(plot_left, plot_bottom, 60, AXIS_HEIGHT),
                          Qt.AlignLeft | Qt.AlignVCenter, view_start.astimezone(tz).strftime("%H:%M:%S"))
         painter.drawText(QRectF(plot_left + plot_width / 2 - 30, plot_bottom, 60, AXIS_HEIGHT),
@@ -426,5 +441,5 @@ class SpikeChart(QWidget):
     @staticmethod
     def _small_font() -> QFont:
         f = QFont()
-        f.setPixelSize(9)
+        f.setPixelSize(10)
         return f

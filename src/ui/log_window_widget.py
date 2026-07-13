@@ -65,6 +65,14 @@ class LogWindowWidget(QWidget):
         super().__init__(parent)
         self.source_label = source_label
         self.color_hex = color_hex
+        # Themeable general-UI accent (distinct from color_hex, which is
+        # this SOURCE's own identifying color) — used by the header action
+        # buttons below, which hardcoded cyan regardless of theme before.
+        self._theme_accent = "#00c4e8"
+        self._theme_badge_bg = "#D1EFF0"
+        self._theme_badge_text = "#000000"
+        self._theme_header_text = "#c8d3ea"
+        self._theme_body_text = "#7284a8"
         self.scroll_position = 0
         self.matched_indices: list[int] = []
 
@@ -91,22 +99,24 @@ class LogWindowWidget(QWidget):
         header.setStyleSheet(
             f"QFrame#LogPanelHeader {{ border-top: 2px solid {self.color_hex}; }}"
         )
+        self._header_frame = header  # kept for set_color() on a theme switch
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 6, 10, 6)
 
         dot = QLabel()
         dot.setFixedSize(8, 8)
         dot.setStyleSheet(f"background-color: {self.color_hex}; border-radius: 4px;")
+        self._dot_label = dot  # kept for set_color() on a theme switch
         header_layout.addWidget(dot)
 
         self.filename_label = QLabel(f"{self.source_label}.csv")
-        # self.filename_label.setStyleSheet("QLabel { color: #ffffff; font-weight: bold; font-size: 12px; }")
+        # self.filename_label.setStyleSheet("QLabel { color: #ffffff; font-weight: bold; font-size: 13px; }")
         self.filename_label.setObjectName("FilenameLabel")  # <-- 1. Assign a unique ID
         header_layout.addWidget(self.filename_label)
 
         self.timezone_badge = QLabel("UTC+8")
         self.timezone_badge.setStyleSheet(
-            "background-color: #D1EFF0; color: #000000; font-size: 10px; "
+            f"background-color: {self._theme_badge_bg}; color: {self._theme_badge_text}; font-size: 11px; "
             "padding: 1px 5px; border-radius: 10px;"
         )
         header_layout.addWidget(self.timezone_badge)
@@ -126,10 +136,10 @@ class LogWindowWidget(QWidget):
         self.restore_button.setToolTip("Click if a maximized window won't resize back down")
         self.restore_button.setStyleSheet(
             "QPushButton#RestoreSizeButton { "
-            "background-color: transparent; color: #00c4e8; border: 1px solid #00c4e8; "
-            "font-size: 10px; border-radius: 3px; padding: 0 8px; } "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
             "QPushButton#RestoreSizeButton:hover { "
-            "background-color: #00c4e8; color: #0a0e1a; }"
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
         )
         self.restore_button.clicked.connect(
             lambda: self.restore_size_requested.emit(self.source_label)
@@ -144,10 +154,10 @@ class LogWindowWidget(QWidget):
         self.detach_button.setToolTip("Detach this log into a movable floating window")
         self.detach_button.setStyleSheet(
             "QPushButton#DetachButton { "
-            "background-color: transparent; color: #00c4e8; border: 1px solid #00c4e8; "
-            "font-size: 10px; border-radius: 3px; padding: 0 8px; } "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
             "QPushButton#DetachButton:hover { "
-            "background-color: #00c4e8; color: #0a0e1a; }"
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
         )
         self.detach_button.clicked.connect(
             lambda: self.detach_requested.emit(self.source_label)
@@ -155,7 +165,8 @@ class LogWindowWidget(QWidget):
         header_layout.addWidget(self.detach_button)
 
         self.row_count_label = QLabel("0 rows")
-        self.row_count_label.setStyleSheet("font-size: 10px; color: #ffffff;")
+        self.row_count_label.setStyleSheet(
+            f"font-size: 11px; color: {self._theme_header_text}; background: transparent;")
         header_layout.addWidget(self.row_count_label)
 
         layout.addWidget(header)
@@ -252,16 +263,16 @@ class LogWindowWidget(QWidget):
         sync_layout = QHBoxLayout(sync_bar)
         sync_layout.setContentsMargins(10, 4, 10, 4)
 
-        sync_label = QLabel("Scroll position")
-        sync_label.setStyleSheet("font-size: 10px; color: #ffffff;")
-        sync_layout.addWidget(sync_label)
+        self._sync_label = QLabel("Scroll position")
+        self._sync_label.setStyleSheet(f"font-size: 11px; color: {self._theme_body_text}; background: transparent;")
+        sync_layout.addWidget(self._sync_label)
 
         self.scroll_indicator = QSlider(Qt.Horizontal)
         self.scroll_indicator.setEnabled(False)  # display-only, driven programmatically
         sync_layout.addWidget(self.scroll_indicator)
 
         self.scroll_timestamp_label = QLabel("--:--")
-        self.scroll_timestamp_label.setStyleSheet(f"font-size: 10px; color: {self.color_hex};")
+        self.scroll_timestamp_label.setStyleSheet(f"font-size: 11px; color: {self.color_hex};")
         sync_layout.addWidget(self.scroll_timestamp_label)
 
         layout.addWidget(sync_bar)
@@ -360,6 +371,48 @@ class LogWindowWidget(QWidget):
         model so every correlated event renders flagged consistently.
         """
         self.table_model.set_flag_anchors(anchors)
+
+    def set_theme(self, theme: dict) -> None:
+        """Updates the header action buttons (Restore/Pop out) and timezone
+        badge — these use the general theme accent, not this panel's own
+        per-source color_hex (see set_color for that).
+        """
+        self._theme_accent = theme["accent"]
+        self._theme_badge_bg = theme["bg_input"]
+        self._theme_badge_text = theme["text_primary"]
+
+        self.timezone_badge.setStyleSheet(
+            f"background-color: {self._theme_badge_bg}; color: {self._theme_badge_text}; font-size: 11px; "
+            "padding: 1px 5px; border-radius: 10px;"
+        )
+        self.restore_button.setStyleSheet(
+            "QPushButton#RestoreSizeButton { "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#RestoreSizeButton:hover { "
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
+        )
+        self.detach_button.setStyleSheet(
+            "QPushButton#DetachButton { "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#DetachButton:hover { "
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
+        )
+        self.table_model.set_theme(theme)
+
+    def set_color(self, color_hex: str) -> None:
+        """Retroactively recolors this already-open panel's header accent,
+        dot, and scroll-position label — used when the source-color palette
+        changes on a theme switch (color_map.set_palette already recomputed
+        the new hex; this just repaints the 3 inline styles that reference it,
+        since none of them are QSS-driven so a stylesheet re-apply wouldn't
+        reach them).
+        """
+        self.color_hex = color_hex
+        self._header_frame.setStyleSheet(f"QFrame#LogPanelHeader {{ border-top: 2px solid {color_hex}; }}")
+        self._dot_label.setStyleSheet(f"background-color: {color_hex}; border-radius: 4px;")
+        self.scroll_timestamp_label.setStyleSheet(f"font-size: 11px; color: {color_hex};")
 
     def scroll_to_time(self, utc_dt) -> None:
         """Scroll so the first row at/after utc_dt is at the top (Sections 3 &

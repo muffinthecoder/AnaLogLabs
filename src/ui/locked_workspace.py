@@ -33,8 +33,11 @@ class LockedWorkspace(QWidget):
 
         self._placeholder = QLabel("No log panels to lock.")
         self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color: #ffffff; font-size: 12px;")
+        self._placeholder.setStyleSheet("color: #7284a8; font-size: 13px;")
         self._layout.addWidget(self._placeholder)
+
+    def set_theme(self, theme: dict) -> None:
+        self._placeholder.setStyleSheet(f"color: {theme['text_secondary']}; font-size: 13px;")
 
     def set_panels(self, panels: dict) -> None:
         """Reparent every panel into this container, side by side. Each keeps

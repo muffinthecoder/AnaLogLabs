@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QVBoxLayout, QLabel, QComboBox,
 )
 from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, display_label_for_timezone
+from src.ui.theme import THEMES, DEFAULT_THEME
+
 # Phase 1: options now come from timezone_map.SUPPORTED_TIMEZONES (9 zones)
 # instead of a hardcoded 3-entry list, and the combo stores each entry's IANA
 # string as userData rather than requiring a label round-trip — three of the
@@ -17,7 +19,7 @@ from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, display_label_for_t
 # alone is not a safe/unique key to parse a fixed offset back out of.
 class TimezoneImportDialog(QDialog):
     """Ask the investigator which timezone they want to VIEW times in."""
-    def __init__(self, file_paths: list[str], parent=None):
+    def __init__(self, file_paths: list[str], theme: dict | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Display Timezone")
         self.setMinimumWidth(420)
@@ -28,12 +30,14 @@ class TimezoneImportDialog(QDialog):
         # TimestampNormalizer — the normalizer uses source tz, not display tz).
         self.timezone_assignments: dict[str, str] = {}
         self._file_paths = file_paths
+        self._theme = theme or THEMES[DEFAULT_THEME]
         self._build_ui()
+        self._apply_theme()
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
-        header = QLabel(
+        self._header = QLabel(
             "Which timezone do you want to <b>view</b> timestamps in?<br>"
             "<br>"
             "Timestamps already in UTC (ending in <b>Z</b>) will be converted "
@@ -41,9 +45,8 @@ class TimezoneImportDialog(QDialog):
             "Timestamps <i>without</i> a Z are assumed to be <b>Perth time "
             "(AWST, UTC+8)</b> and will be converted accordingly."
         )
-        header.setWordWrap(True)
-        header.setStyleSheet("font-size: 11px; color: #ffffff; padding-bottom: 4px;")
-        layout.addWidget(header)
+        self._header.setWordWrap(True)
+        layout.addWidget(self._header)
         self._combo = QComboBox()
         # No log data is loaded yet when this dialog is shown, so
         # display_label_for_timezone() falls back to "now" for DST zones'
@@ -53,11 +56,36 @@ class TimezoneImportDialog(QDialog):
             self._combo.addItem(display_label_for_timezone(iana_tz), userData=iana_tz)
         self._combo.setMinimumWidth(260)
         layout.addWidget(self._combo)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Import")
-        buttons.accepted.connect(self._on_accepted)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._buttons.button(QDialogButtonBox.Ok).setText("Import")
+        self._buttons.accepted.connect(self._on_accepted)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+    def _apply_theme(self) -> None:
+        """This is a genuine QDialog (top-level window), so — like the
+        floating chart/log windows — it never inherited MainWindow's
+        stylesheet at all, regardless of theme. It previously had hardcoded
+        white text on whatever Qt's default dialog background happens to be,
+        which is why it was unreadable in a light theme.
+        """
+        t = self._theme
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {t['bg_sidebar']}; }}
+            QLabel {{ color: {t['text_primary']}; background: transparent; }}
+            QComboBox {{
+                background-color: {t['bg_input']}; color: {t['text_primary']};
+                border: 1px solid {t['border']}; border-radius: 6px; padding: 4px 8px;
+            }}
+            QDialogButtonBox QPushButton {{
+                background-color: {t['bg_input']}; color: {t['text_primary']};
+                border: 1px solid {t['border']}; border-radius: 6px; padding: 5px 14px;
+            }}
+            QDialogButtonBox QPushButton:hover {{ border-color: {t['accent']}; }}
+        """)
+        self._header.setStyleSheet(
+            f"font-size: 13px; color: {t['text_primary']}; padding-bottom: 4px; background: transparent;"
+        )
     def _on_accepted(self) -> None:
         self.display_timezone = self._combo.currentData() or "Asia/Dubai"
         # Populate timezone_assignments so MainWindow's existing loop

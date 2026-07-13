@@ -83,9 +83,15 @@ class BubbleChart(pg.PlotWidget):
         self._entity_names: list[str] = []
         self._flag_anchors: list[datetime] = []
 
+        # Themeable — see ActivityHeatmap.set_theme for why these need to be
+        # instance state rather than the module constants they default to.
+        self._axis_text_color = AXIS_TEXT_COLOR
+        self._empty_state_text = EMPTY_STATE_TEXT
+        self._flag_glow_color = FLAG_GLOW_COLOR
+
         # Setup Axes
-        self.getAxis("bottom").setTextPen(pg.mkPen(AXIS_TEXT_COLOR))
-        self.getAxis("left").setTextPen(pg.mkPen(AXIS_TEXT_COLOR))
+        self.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_color))
+        self.getAxis("left").setTextPen(pg.mkPen(self._axis_text_color))
         self.getAxis("left").setWidth(Y_AXIS_WIDTH)  # Room for entity names
         axis_font = self._small_font()
         self.getAxis("bottom").setStyle(tickFont=axis_font)
@@ -137,8 +143,32 @@ class BubbleChart(pg.PlotWidget):
         self._halo_scatter = pg.ScatterPlotItem(pen=pg.mkPen(None))
         self.addItem(self._halo_scatter)
 
-        self._empty_text = pg.TextItem("No log data loaded", color=EMPTY_STATE_TEXT, anchor=(0.5, 0.5))
+        self._empty_text = pg.TextItem("No log data loaded", color=self._empty_state_text, anchor=(0.5, 0.5))
         self.addItem(self._empty_text)
+
+    def set_theme(self, theme: dict) -> None:
+        """See ActivityHeatmap.set_theme — pyqtgraph's axis pens and TextItem
+        color are also set once at creation time, not re-read from QSS, so
+        they need the same explicit update on a theme switch.
+
+        The re-call to setBackground(None) below matters more than it looks:
+        pyqtgraph's GraphicsView resolves and CACHES its background brush at
+        the moment setBackground() is called, rather than re-reading the
+        widget's QSS-styled background live — so on a THEME SWITCH (as
+        opposed to first construction), the chart's background silently kept
+        showing the OLD theme's color until this was added. Found by
+        pixel-sampling an actual live switch, not just checking the
+        stylesheet string updated (which it always did — the bug was Qt/
+        pyqtgraph not repainting from it).
+        """
+        self._axis_text_color = theme["chart_text_dim"]
+        self._empty_state_text = theme["chart_text_dim"]
+        self._flag_glow_color = theme["flag_color"]
+        self.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_color))
+        self.getAxis("left").setTextPen(pg.mkPen(self._axis_text_color))
+        self._empty_text.setColor(self._empty_state_text)
+        self.setBackground(None)
+        self._refresh_plot()
 
         self._resize_for_rows(MAX_ENTITIES)
 
@@ -213,7 +243,7 @@ class BubbleChart(pg.PlotWidget):
     def _small_font():
         from PySide6.QtGui import QFont
         f = QFont()
-        f.setPixelSize(9)
+        f.setPixelSize(10)
         return f
 
     # -- Internal Logic -------------------------------------------------------
@@ -231,6 +261,25 @@ class BubbleChart(pg.PlotWidget):
     def _elide(text: str, max_chars: int) -> str:
         return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
 
+    def _show_empty(self, text: str) -> None:
+        """Centers the empty-state message across the FULL widget width —
+        previously the Y-axis gutter (140px, needed once real entity labels
+        exist) stayed reserved even with nothing to show in it, and the text
+        was never given an explicit position, so it rendered off-center in
+        whatever arbitrary range pyqtgraph happened to default to. Both are
+        fixed here: axes hidden (no gutter to leave blank) and a known fixed
+        range with the text explicitly centered in it.
+        """
+        self.getAxis("left").setTicks([])
+        self.getAxis("bottom").setTicks([])
+        self.showAxis("left", False)
+        self.showAxis("bottom", False)
+        self.setXRange(0, 1, padding=0)
+        self.setYRange(0, 1, padding=0)
+        self._empty_text.setPos(0.5, 0.5)
+        self._empty_text.setText(text)
+        self._empty_text.setVisible(True)
+
     def _refresh_plot(self) -> None:
         self._scatter.clear()
         self._activity_glow_scatter.clear()
@@ -238,20 +287,17 @@ class BubbleChart(pg.PlotWidget):
 
         # 1. Empty State Checks
         if not self._entries_by_source:
-            self._empty_text.setText("No log data loaded")
-            self._empty_text.setVisible(True)
-            self.getAxis("left").setTicks([])
-            self.getAxis("bottom").setTicks([])
+            self._show_empty("No logs loaded yet")
             return
 
         if not self._range_start or not self._range_end or self._range_end <= self._range_start:
-            self._empty_text.setText("Enter a time range to see the bubble chart")
-            self._empty_text.setVisible(True)
-            self.getAxis("left").setTicks([])
-            self.getAxis("bottom").setTicks([])
+            self._show_empty("Enter a time range to see the bubble chart")
             return
 
         self._empty_text.setVisible(False)
+        self.showAxis("left", True)
+        self.showAxis("bottom", True)
+        self.getAxis("left").setWidth(Y_AXIS_WIDTH)
 
         # 2. Filter data to the active time range
         range_start_ts = self._range_start.timestamp()
@@ -292,8 +338,7 @@ class BubbleChart(pg.PlotWidget):
                         buckets_flagged[key] = True
 
         if not entity_totals:
-            self._empty_text.setText("No identifiable entities (Users/IPs) in this range")
-            self._empty_text.setVisible(True)
+            self._show_empty("No identifiable entities (Users/IPs) in this range")
             return
 
         # 3. Rank top entities
@@ -385,14 +430,17 @@ class BubbleChart(pg.PlotWidget):
 
                 if flagged:
                     # Real glow: several oversized, increasingly translucent
-                    # white spots stacked behind the bubble on the halo layer
-                    # — reserved exclusively for flagged entries, never tied
+                    # spots stacked behind the bubble on the halo layer —
+                    # reserved exclusively for flagged entries, never tied
                     # to bubble size/volume.
+                    flag_c = QColor(self._flag_glow_color)
                     for layer in range(3, 0, -1):
+                        glow_c = QColor(flag_c)
+                        glow_c.setAlpha(int(90 / layer))
                         halo_spots.append({
                             'pos': (x_ts, y_coord),
                             'size': bubble_size + layer * 10,
-                            'brush': QBrush(QColor(255, 255, 255, int(70 / layer))),
+                            'brush': QBrush(glow_c),
                         })
                 elif key in activity_glow_keys:
                     # One of the fixed top-N largest non-flagged bubbles —

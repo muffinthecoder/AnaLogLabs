@@ -62,18 +62,23 @@ class TimeFrameSelector(QWidget):
         title.setProperty("class", "SectionTitle")
         layout.addWidget(title)
 
-        start_label = QLabel("Start")
-        start_label.setStyleSheet("font-size: 10px; color: #ffffff;")
-        layout.addWidget(start_label)
+        # Themeable — these previously hardcoded white text, which is
+        # invisible once the sidebar background goes light (Light theme).
+        self._theme_text = "#c8d3ea"
+        self._theme_dim = "#7284a8"
+
+        self._start_label = QLabel("Start")
+        self._start_label.setStyleSheet(f"font-size: 11px; color: {self._theme_text}; background: transparent;")
+        layout.addWidget(self._start_label)
 
         self.start_input = QLineEdit()
         self.start_input.setObjectName("FilterInput")
         self.start_input.setPlaceholderText("YYYY-MM-DD HH:MM:SS.mmm")
         layout.addWidget(self.start_input)
 
-        end_label = QLabel("End")
-        end_label.setStyleSheet("font-size: 10px; color: #ffffff;")
-        layout.addWidget(end_label)
+        self._end_label = QLabel("End")
+        self._end_label.setStyleSheet(f"font-size: 11px; color: {self._theme_text}; background: transparent;")
+        layout.addWidget(self._end_label)
 
         self.end_input = QLineEdit()
         self.end_input.setObjectName("FilterInput")
@@ -82,13 +87,13 @@ class TimeFrameSelector(QWidget):
 
         # R4 — make the auto-applied boundary offset visible so the widened
         # window isn't a surprise ("why am I seeing 13:59 events?").
-        offset_note = QLabel("A ±1 min offset is applied automatically.")
-        offset_note.setStyleSheet("font-size: 10px; color: #ffffff;")
-        offset_note.setWordWrap(True)
-        layout.addWidget(offset_note)
+        self._offset_note = QLabel("A ±1 min offset is applied automatically.")
+        self._offset_note.setStyleSheet(f"font-size: 11px; color: {self._theme_dim}; background: transparent;")
+        self._offset_note.setWordWrap(True)
+        layout.addWidget(self._offset_note)
 
         self.error_label = QLabel("")
-        self.error_label.setStyleSheet("font-size: 10px; color: #e06060;")
+        self.error_label.setStyleSheet("font-size: 11px; color: #e06060; background: transparent;")
         self.error_label.setWordWrap(True)
         self.error_label.hide()
         layout.addWidget(self.error_label)
@@ -102,6 +107,13 @@ class TimeFrameSelector(QWidget):
         self.clear_button.setObjectName("ClearFilterButton")
         self.clear_button.clicked.connect(self._on_clear_clicked)
         layout.addWidget(self.clear_button)
+
+    def set_theme(self, theme: dict) -> None:
+        self._theme_text = theme["text_primary"]
+        self._theme_dim = theme["text_secondary"]
+        self._start_label.setStyleSheet(f"font-size: 11px; color: {self._theme_text}; background: transparent;")
+        self._end_label.setStyleSheet(f"font-size: 11px; color: {self._theme_text}; background: transparent;")
+        self._offset_note.setStyleSheet(f"font-size: 11px; color: {self._theme_dim}; background: transparent;")
 
     def _parse_user_datetime(self, text: str) -> tuple[datetime | None, bool]:
         """Parses a Start/End field, returning (naive_datetime, is_utc).
