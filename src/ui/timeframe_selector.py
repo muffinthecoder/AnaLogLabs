@@ -63,7 +63,7 @@ class TimeFrameSelector(QWidget):
         layout.addWidget(title)
 
         start_label = QLabel("Start")
-        start_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
+        start_label.setStyleSheet("font-size: 10px; color: #ffffff;")
         layout.addWidget(start_label)
 
         self.start_input = QLineEdit()
@@ -72,7 +72,7 @@ class TimeFrameSelector(QWidget):
         layout.addWidget(self.start_input)
 
         end_label = QLabel("End")
-        end_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
+        end_label.setStyleSheet("font-size: 10px; color: #ffffff;")
         layout.addWidget(end_label)
 
         self.end_input = QLineEdit()
@@ -83,7 +83,7 @@ class TimeFrameSelector(QWidget):
         # R4 — make the auto-applied boundary offset visible so the widened
         # window isn't a surprise ("why am I seeing 13:59 events?").
         offset_note = QLabel("A ±1 min offset is applied automatically.")
-        offset_note.setStyleSheet("font-size: 9px; color: #4a5a7a;")
+        offset_note.setStyleSheet("font-size: 10px; color: #ffffff;")
         offset_note.setWordWrap(True)
         layout.addWidget(offset_note)
 

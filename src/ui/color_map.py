@@ -13,16 +13,23 @@ Root cause this replaces: the import path hardcoded every file to the same blue
 
 # Eight visually distinct hues — enough for the 8-window cap. Chosen to read
 # clearly on the app's dark background and to stay distinguishable side by side.
+# First four are the approved SOC palette (warm/cool split); the remaining four
+# extend it for additional sources while keeping the same design language.
 _PALETTE = [
-    "#00c4e8",  # cyan
-    "#57cc99",  # green
-    "#ffd60a",  # yellow
-    "#e06060",  # red
-    "#b06be0",  # purple
-    "#e8933a",  # orange
-    "#48d1cc",  # teal
-    "#f06fae",  # pink
+    "#2e8fff",  # blue      — Application
+    "#1fd1c0",  # teal      — Interactive sign-in
+    "#ffab2e",  # amber     — Auth details
+    "#ff4fa3",  # pink      — MSISignIns
+    "#8f7fff",  # violet
+    "#7ee787",  # lime
+    "#4fc3f7",  # sky
+    "#ff8a65",  # coral
 ]
+
+# Reserved exclusively for flagged / correlated events — never assigned to a
+# source, so a glowing element always reads unambiguously as "flagged", never
+# as "which file this is from".
+FLAG_GLOW_COLOR = "#ffffff"
 
 
 class SourceColorMap:

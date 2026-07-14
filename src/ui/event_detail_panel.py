@@ -17,7 +17,9 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame
 
 from src.models.data_classes import RawLogEntry
 from src.normaliser.timezone_map import utc_offset_label, DEFAULT_TIMEZONE
-
+from PySide6.QtCore import Qt, QEvent # Added QEvent
+from PySide6.QtWidgets import QWidget, QApplication, QMenu  # Added QApplication, QMenu, QAction
+from PySide6.QtGui import QAction  # or PyQt6
 
 STATUS_COLORS = {
     "Success": "#57cc99",
@@ -39,12 +41,21 @@ class FieldDisplay(QWidget):
         self.key_label = QLabel(key.upper())
         self.key_label.setProperty("class", "FieldKey")
         layout.addWidget(self.key_label)
+        
 
         self.value_label = QLabel(value)
         self.value_label.setProperty("class", "FieldValue")
         if value_color:
             self.value_label.setStyleSheet(f"font-size: 11px; color: {value_color};")
         layout.addWidget(self.value_label)
+    
+    def _restore_header(self):
+        """Restores the header text after the 'COPIED' alert."""
+        if self._last_entry:
+            username = self._last_entry.fields.get("username", self._last_entry.fields.get("account", "--"))
+            self.header_label.setText(
+                f"EVENT DETAIL — {username} \u00b7 {self._last_entry.fields.get('timestamp', '--')} \u00b7 {self._last_entry.source_label}"
+            )
 
     def set_value(self, value: str, value_color: str | None = None) -> None:
         self.value_label.setText(value)
@@ -58,7 +69,7 @@ class EventDetailPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("EventDetailPanel")
-        self.setFixedHeight(110)
+        # self.setFixedHeight(110)
 
         # R3 — the detail timestamp is rendered in this display timezone,
         # kept in step with the top-nav dropdown via set_display_timezone().
@@ -73,7 +84,7 @@ class EventDetailPanel(QWidget):
         # Header bar
         self.header_label = QLabel("EVENT DETAIL — no event selected")
         self.header_label.setStyleSheet(
-            "font-size: 10px; font-weight: 500; color: #4a5a7a; "
+            "font-size: 10px; font-weight: 500; color: #00c4e8; "
             "padding: 6px 10px; text-transform: uppercase;"
         )
         outer.addWidget(self.header_label)
@@ -95,7 +106,7 @@ class EventDetailPanel(QWidget):
         self.field_ip = FieldDisplay("IP address", "--")
         self.field_status = FieldDisplay("Status", "--")
         self.field_source = FieldDisplay("Source type", "--")
-        self.field_correlation = FieldDisplay("Correlation", "--", value_color="#ffd60a")
+        self.field_correlation = FieldDisplay("Correlation", "--", value_color="#ffffff")
 
         for field in (
             self.field_timestamp, self.field_username, self.field_ip,
@@ -110,6 +121,8 @@ class EventDetailPanel(QWidget):
         # ---- Right: raw JSON ------------------------------------------------
         self.raw_json_label = QLabel("Select an event to view raw data.")
         self.raw_json_label.setObjectName("RawJsonLabel")
+        self.raw_json_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.raw_json_label.customContextMenuRequested.connect(self._show_detail_menu)
         self.raw_json_label.setWordWrap(True)
         self.raw_json_label.setStyleSheet(
             "background-color: #0f1526; color: #5a7a9a; font-family: Consolas, monospace; "
@@ -118,6 +131,43 @@ class EventDetailPanel(QWidget):
         body_layout.addWidget(self.raw_json_label, stretch=1)
 
         outer.addWidget(body, stretch=1)
+        self.raw_json_label.installEventFilter(self)
+    
+    def _show_detail_menu(self, pos):
+        menu = QMenu(self)
+        copy_all = QAction("Copy full event details", self)
+        
+        # The text() method on a QLabel gets the raw JSON string you set in show_event()
+        copy_all.triggered.connect(
+            lambda: QApplication.clipboard().setText(self.raw_json_label.text())
+        )
+        
+        menu.addAction(copy_all)
+        menu.exec(self.raw_json_label.mapToGlobal(pos))
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj == self.raw_json_label and event.type() == QEvent.MouseButtonDblClick:
+            # Copy to clipboard immediately
+            QApplication.clipboard().setText(self.raw_json_label.text())
+            
+            # Optional: Visual feedback to the user
+            self.header_label.setText("COPIED TO CLIPBOARD!")
+            
+            # Reset header text after 1 second
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1000, lambda: self._restore_header())
+            
+            return True # Event handled
+            
+        return super().eventFilter(obj, event)
+
+    def _restore_header(self):
+        """Restores the header text after the 'COPIED' alert."""
+        if self._last_entry:
+            username = self._last_entry.fields.get("username", self._last_entry.fields.get("account", "--"))
+            self.header_label.setText(
+                f"EVENT DETAIL — {username} \u00b7 {self._last_entry.fields.get('timestamp', '--')} \u00b7 {self._last_entry.source_label}"
+            )
 
     def show_event(self, entry: RawLogEntry, correlation_count: int = 0) -> None:
         """Populate the panel from a clicked RawLogEntry. Field keys below are

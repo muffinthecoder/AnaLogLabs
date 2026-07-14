@@ -57,8 +57,8 @@ class ActivityFrequencyChart(pg.PlotWidget):
         self.showGrid(x=False, y=True, alpha=0.15)
         self.getAxis("left").setStyle(tickLength=0)
         self.getAxis("bottom").setStyle(tickLength=0)
-        self.getAxis("left").setTextPen(pg.mkPen("#4a5a7a"))
-        self.getAxis("bottom").setTextPen(pg.mkPen("#4a5a7a"))
+        self.getAxis("left").setTextPen(pg.mkPen("#161d35"))   # <-- CHANGED
+        self.getAxis("bottom").setTextPen(pg.mkPen("#161d35")) # <-- CHANGED
         self.getPlotItem().setMenuEnabled(False)
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
@@ -253,12 +253,12 @@ class ActivityFrequencyChart(pg.PlotWidget):
         if self._window_start is None or self._window_end is None:
             return
 
-        pen = pg.mkPen("#00c4e8", width=1, style=Qt.DashLine)
+        pen = pg.mkPen("#161d35", width=1, style=Qt.DashLine)
         for boundary in (self._window_start, self._window_end):
             line = pg.InfiniteLine(pos=boundary.timestamp(), angle=90, pen=pen)
             self.addItem(line)
 
     def _show_empty_state(self) -> None:
-        text = pg.TextItem("No log data loaded", color="#4a5a7a", anchor=(0.5, 0.5))
+        text = pg.TextItem("No log data loaded", color="#161d35", anchor=(0.5, 0.5))
         self.addItem(text)
         self.getViewBox().autoRange()

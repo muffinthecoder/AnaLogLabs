@@ -66,8 +66,8 @@ class TimelineWidget(pg.PlotWidget):
         self.setBackground(None)
 
         self.showGrid(x=False, y=False)
-        self.getAxis("bottom").setTextPen(pg.mkPen("#4a5a7a"))
-        self.getAxis("left").setTextPen(pg.mkPen("#4a5a7a"))
+        self.getAxis("bottom").setTextPen(pg.mkPen("#161d35"))
+        self.getAxis("left").setTextPen(pg.mkPen("#161d35"))
         self.getAxis("left").setStyle(tickLength=0)
         self.getAxis("bottom").setStyle(tickLength=0)
         self.getPlotItem().setMenuEnabled(False)
@@ -123,7 +123,7 @@ class TimelineWidget(pg.PlotWidget):
         offset_seconds = -self._tz_offset_seconds(tz_name)
         new_axis = pg.DateAxisItem(utcOffset=offset_seconds)
         self.getPlotItem().setAxisItems({"bottom": new_axis})
-        new_axis.setTextPen(pg.mkPen("#4a5a7a"))
+        new_axis.setTextPen(pg.mkPen("#BDE8F0"))
         new_axis.setStyle(tickLength=0)
 
     # -- Public API --------------------------------------------------------------
@@ -308,6 +308,6 @@ class TimelineWidget(pg.PlotWidget):
                 return
 
     def _show_empty_state(self) -> None:
-        text = pg.TextItem("No log data loaded", color="#4a5a7a", anchor=(0.5, 0.5))
+        text = pg.TextItem("No log data loaded", color="#BDE8F0", anchor=(0.5, 0.5))
         self.addItem(text)
         self.getViewBox().autoRange()

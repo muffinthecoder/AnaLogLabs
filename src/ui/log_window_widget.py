@@ -100,12 +100,13 @@ class LogWindowWidget(QWidget):
         header_layout.addWidget(dot)
 
         self.filename_label = QLabel(f"{self.source_label}.csv")
-        self.filename_label.setStyleSheet("font-weight: 500; font-size: 11px;")
+        # self.filename_label.setStyleSheet("QLabel { color: #ffffff; font-weight: bold; font-size: 12px; }")
+        self.filename_label.setObjectName("FilenameLabel")  # <-- 1. Assign a unique ID
         header_layout.addWidget(self.filename_label)
 
         self.timezone_badge = QLabel("UTC+8")
         self.timezone_badge.setStyleSheet(
-            "background-color: #1e2a4a; color: #4a5a7a; font-size: 10px; "
+            "background-color: #D1EFF0; color: #000000; font-size: 10px; "
             "padding: 1px 5px; border-radius: 10px;"
         )
         header_layout.addWidget(self.timezone_badge)
@@ -154,7 +155,7 @@ class LogWindowWidget(QWidget):
         header_layout.addWidget(self.detach_button)
 
         self.row_count_label = QLabel("0 rows")
-        self.row_count_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
+        self.row_count_label.setStyleSheet("font-size: 10px; color: #ffffff;")
         header_layout.addWidget(self.row_count_label)
 
         layout.addWidget(header)
@@ -252,7 +253,7 @@ class LogWindowWidget(QWidget):
         sync_layout.setContentsMargins(10, 4, 10, 4)
 
         sync_label = QLabel("Scroll position")
-        sync_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
+        sync_label.setStyleSheet("font-size: 10px; color: #ffffff;")
         sync_layout.addWidget(sync_label)
 
         self.scroll_indicator = QSlider(Qt.Horizontal)
@@ -379,6 +380,35 @@ class LogWindowWidget(QWidget):
         if not found:
             target = len(entries) - 1
         self.receive_sync_scroll(target)
+
+    def select_and_scroll_to_time(self, utc_dt) -> RawLogEntry | None:
+        """Programmatic navigation entry point for chart-click interactions —
+        scrolls to (and selects/highlights) the entry CLOSEST to utc_dt, then
+        emits row_selected the same way a manual row click would, so the
+        Event Detail panel updates to match. Distinct from scroll_to_time()
+        above, which finds the first entry AT/AFTER a timestamp rather than
+        the nearest one — that distinction matters less for a chart click,
+        where "closest" is the more intuitive landing point.
+        """
+        entries = self.table_model.get_entries()
+        if not entries:
+            return None
+        best_index = 0
+        best_delta = None
+        for i, e in enumerate(entries):
+            nts = e.normalized_timestamp
+            if nts is None:
+                continue
+            delta = abs((nts.utc_datetime - utc_dt).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_index = i
+        self.receive_sync_scroll(best_index)
+        entry = self.table_model.entry_at(best_index)
+        if entry is not None:
+            self.table_model.set_selected_row(best_index)
+            self.row_selected.emit(entry)
+        return entry
 
     def first_entry_time(self):
         """UTC datetime of this file's earliest event, or None."""

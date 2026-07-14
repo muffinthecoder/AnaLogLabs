@@ -42,7 +42,7 @@ class TimezoneImportDialog(QDialog):
             "(AWST, UTC+8)</b> and will be converted accordingly."
         )
         header.setWordWrap(True)
-        header.setStyleSheet("font-size: 11px; color: #8090b0; padding-bottom: 4px;")
+        header.setStyleSheet("font-size: 11px; color: #ffffff; padding-bottom: 4px;")
         layout.addWidget(header)
         self._combo = QComboBox()
         # No log data is loaded yet when this dialog is shown, so
