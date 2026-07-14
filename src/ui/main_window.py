@@ -18,14 +18,14 @@ data/application layers.
 import sys
 from datetime import timedelta
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QSettings, QTimer, QEvent
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox, QDialog,
+    QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox, QDialog, QLabel,
 )
 
-from src.ui.styles import MAIN_STYLESHEET
+from src.ui.theme import THEMES, THEME_LABELS, DEFAULT_THEME, build_stylesheet
 from src.ui.top_nav_bar import TopNavBar
 from src.ui.left_panel import LeftPanel, SORT_TIME_ASC, SORT_TIME_DESC, SORT_NAME
 from src.ui.log_window_widget import LogWindowWidget
@@ -54,12 +54,18 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AnaLog Labs")
         self.resize(1500, 950)
-        self.setStyleSheet(MAIN_STYLESHEET)
 
         self._settings = QSettings("PentalogTech", "AnaLogLabs")
 
+        # Theme (Section: switchable color themes) — restored from last
+        # session if present, otherwise the original palette by default.
+        self._current_theme = self._settings.value("theme", DEFAULT_THEME)
+        if self._current_theme not in THEMES:
+            self._current_theme = DEFAULT_THEME
+        self.setStyleSheet(build_stylesheet(THEMES[self._current_theme]))
+
         # -- shared state ------------------------------------------------------
-        self.color_map = SourceColorMap()
+        self.color_map = SourceColorMap(palette=THEMES[self._current_theme]["accent_palette"])
         self._scroll_sync = ScrollSyncManager()
         # True while the unified single-scrollbar lock is active.
         self._locked = False
@@ -100,12 +106,16 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         self.top_nav = TopNavBar()
+        self.top_nav.set_current_theme(self._current_theme)
         root.addWidget(self.top_nav)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
 
         self.left_panel = LeftPanel(timezone=self._display_tz)
+        self.left_panel.tab_manager.set_theme(THEMES[self._current_theme])
+        self.left_panel.timeframe_selector.set_theme(THEMES[self._current_theme])
+        self.left_panel.session_notes.set_theme(THEMES[self._current_theme])
         self.left_panel.setMinimumWidth(170)
         self.main_splitter.addWidget(self.left_panel)
 
@@ -114,6 +124,7 @@ class MainWindow(QMainWindow):
 
         self.visualization_row = VisualizationRow()
         self.visualization_row.set_display_timezone(self._display_tz)
+        self.visualization_row.set_theme(THEMES[self._current_theme])
         self.right_splitter.addWidget(self.visualization_row)
 
         # Log space: MDI workspace (or the locked view) + event detail.
@@ -129,15 +140,30 @@ class MainWindow(QMainWindow):
         self.panels_area.setPalette(pal)
         self.panels_area.setBackground(QColor(BACKGROUND_COLOR))
 
+        # Shown only while no log file is open — otherwise this whole area is
+        # just an unexplained empty void, which is what prompted this.
+        self._empty_workspace_label = QLabel(
+            "No logs loaded yet\nImport a log file to see it here.", self.panels_area
+        )
+        self._empty_workspace_label.setAlignment(Qt.AlignCenter)
+        self._empty_workspace_label.setWordWrap(True)
+        self._empty_workspace_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.panels_area.installEventFilter(self)
+        self._apply_workspace_theme(THEMES[self._current_theme])
+        self._update_empty_workspace_geometry()
+        self._update_workspace_empty_state()
+
         # A stacked widget swaps between the movable MDI workspace and the
         # unified single-scrollbar locked view (Sync Scroll on).
         self._locked_workspace = LockedWorkspace()
+        self._locked_workspace.set_theme(THEMES[self._current_theme])
         self.workspace_stack = QStackedWidget()
         self.workspace_stack.addWidget(self.panels_area)  # index 0
         self.workspace_stack.addWidget(self._locked_workspace)  # index 1
         self.log_splitter.addWidget(self.workspace_stack)
 
         self.event_detail_panel = EventDetailPanel()
+        self.event_detail_panel.set_theme(THEMES[self._current_theme])
         self.event_detail_panel.set_display_timezone(self._display_tz)
         self.log_splitter.addWidget(self.event_detail_panel)
 
@@ -192,12 +218,14 @@ class MainWindow(QMainWindow):
         # timezone changes) — see toast_notification.py. Parented directly to
         # the QMainWindow (not the central widget) and raised on every show()
         # so it always floats above whatever panel/log window is underneath.
-        self.toast = ToastNotification(self)
+        self.toast = ToastNotification(self, theme=THEMES[self._current_theme])
 
     def _connect_signals(self) -> None:
         self.top_nav.import_logs_clicked.connect(self._on_import_logs)
         self.top_nav.display_timezone_changed.connect(self._on_display_tz_changed)
         self.top_nav.sync_scroll_toggled.connect(self._on_sync_scroll_toggled)
+        self.top_nav.theme_changed.connect(self._on_theme_changed)
+        self.top_nav.clear_flags_clicked.connect(self._on_clear_all_flags)
 
         self.left_panel.tab_manager.tab_selected.connect(self._on_tab_selected)
         self.visualization_row.element_clicked.connect(self._on_chart_navigate)
@@ -230,6 +258,34 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "toast"):
             self.toast.reposition()
+        if hasattr(self, "_empty_workspace_label"):
+            self._update_empty_workspace_geometry()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is getattr(self, "panels_area", None) and event.type() == QEvent.Resize:
+            self._update_empty_workspace_geometry()
+        return super().eventFilter(obj, event)
+
+    def _update_empty_workspace_geometry(self) -> None:
+        self._empty_workspace_label.setGeometry(self.panels_area.viewport().rect())
+
+    def _update_workspace_empty_state(self) -> None:
+        self._empty_workspace_label.setVisible(len(self.log_panels) == 0)
+
+    def _apply_workspace_theme(self, theme: dict) -> None:
+        """Re-colors the MDI workspace background and its empty-state message
+        — this used a fixed BACKGROUND_COLOR constant entirely outside the
+        theme system, which (like several other spots found this session)
+        would have stayed dark regardless of theme otherwise.
+        """
+        bg = QColor(theme["bg_app"])
+        pal = self.panels_area.palette()
+        pal.setColor(QPalette.Window, bg)
+        self.panels_area.setPalette(pal)
+        self.panels_area.setBackground(bg)
+        self._empty_workspace_label.setStyleSheet(
+            f"color: {theme['text_secondary']}; font-size: 13px; background: transparent;"
+        )
 
     # -- Import --------------------------------------------------------------------
 
@@ -249,7 +305,7 @@ class MainWindow(QMainWindow):
         # Perth — is fixed in TimestampNormalizer and applies regardless of
         # this choice); it only sets how already-normalised UTC values are
         # rendered afterward.
-        dialog = TimezoneImportDialog(file_paths, parent=self)
+        dialog = TimezoneImportDialog(file_paths, theme=THEMES[self._current_theme], parent=self)
         if dialog.exec() != QDialog.Accepted:
             return  # investigator cancelled; do not import
 
@@ -334,11 +390,14 @@ class MainWindow(QMainWindow):
         # earlier "Timezone changed" toast fired above in this same import.
         if imported_count:
             noun = "file" if imported_count == 1 else "files"
-            self.toast.show_toast("Logs imported", f"{imported_count} {noun} added", kind="success")
+            self.toast.show_toast("Logs imported", f"{imported_count} {noun} added", kind="success",
+                                  anchor=self.top_nav.import_button)
         elif failed_count and not duplicates:
-            self.toast.show_toast("Import failed", "No valid log files found", kind="warning")
+            self.toast.show_toast("Import failed", "No valid log files found", kind="warning",
+                                  anchor=self.top_nav.import_button)
         elif duplicates and not failed_count:
-            self.toast.show_toast("Already imported", "No new files were added", kind="neutral")
+            self.toast.show_toast("Already imported", "No new files were added", kind="neutral",
+                                  anchor=self.top_nav.import_button)
 
     def add_log_panel(self, source_label: str, color_hex: str, columns: list[str]) -> LogWindowWidget:
         panel = LogWindowWidget(source_label=source_label, color_hex=color_hex, columns=columns)
@@ -354,9 +413,11 @@ class MainWindow(QMainWindow):
         panel.set_display_timezone(self._display_tz)
         panel.set_timezone_label(utc_offset_label(self._display_tz))
         panel.set_flag_anchors(self._flag_anchors)
+        panel.set_theme(THEMES[self._current_theme])
 
         self.log_panels[source_label] = panel
         self.left_panel.tab_manager.add_tab(source_label, color_hex)
+        self._update_workspace_empty_state()
 
         if self._locked:
             self._rebuild_locked_workspace()
@@ -397,7 +458,47 @@ class MainWindow(QMainWindow):
         # The investigation window is an ABSOLUTE (UTC) window, so switching the
         # display timezone only changes how times are shown — the same events
         # stay highlighted. Nothing to re-filter here.
-        self.toast.show_toast("Timezone changed", f"Now displaying times in {iana_tz}", kind="info")
+        self.toast.show_toast("Timezone changed", f"Now displaying times in {iana_tz}", kind="info",
+                              anchor=self.top_nav.display_tz_dropdown)
+
+    def _on_theme_changed(self, theme_key: str) -> None:
+        """Switches the active color theme (Section: switchable themes).
+        Re-applies the app-wide QSS, pushes the new colors into the three
+        charts (QPainter/pyqtgraph don't pick up QSS changes on their own),
+        remaps the source-color palette so existing sources keep their slot
+        but get the new theme's hue, recolors already-open log panel headers
+        to match, and persists the choice for next launch.
+        """
+        if theme_key not in THEMES:
+            return
+        self._current_theme = theme_key
+        theme = THEMES[theme_key]
+
+        self.setStyleSheet(build_stylesheet(theme))
+        self.visualization_row.set_theme(theme)
+        self.event_detail_panel.set_theme(theme)
+        self.left_panel.tab_manager.set_theme(theme)
+        self.left_panel.timeframe_selector.set_theme(theme)
+        self._locked_workspace.set_theme(theme)
+        self.left_panel.session_notes.set_theme(theme)
+        self._apply_workspace_theme(theme)
+        self.toast.set_theme(theme)
+        # Floating log windows are genuine top-level OS windows, not children
+        # of MainWindow, so they never inherited setStyleSheet() above —
+        # each currently-open one needs its own explicit update.
+        for floating in self.floating_windows.values():
+            floating.set_theme(theme)
+
+        self.color_map.set_palette(theme["accent_palette"])
+        for source_label, panel in self.log_panels.items():
+            panel.set_color(self.color_map.color_for(source_label))
+            panel.set_theme(theme)
+        self._refresh_visualization()
+        self._apply_flag_anchors()  # flag glow color is theme-dependent too
+
+        self._settings.setValue("theme", theme_key)
+        self.toast.show_toast("Theme changed", THEME_LABELS.get(theme_key, theme_key), kind="info",
+                              anchor=self.top_nav.theme_dropdown)
 
     def _badge_label_for_panel(self, iana_tz: str, panel: LogWindowWidget) -> str:
         """Feature 2 — the "UTC+X" badge for one panel, computed against that
@@ -441,6 +542,7 @@ class MainWindow(QMainWindow):
             "Filter applied",
             f"{self._highlighted_count:,} row{'s' if self._highlighted_count != 1 else ''} matched",
             kind="success",
+            anchor=self.left_panel.timeframe_selector.apply_button,
         )
 
     def _apply_filter_highlighting(self, config: FilterConfig) -> None:
@@ -477,11 +579,13 @@ class MainWindow(QMainWindow):
         self._highlighted_count = 0
         self.visualization_row.set_investigation_range(None, None)
         self._recompute_stats()
-        self.toast.show_toast("Filter cleared", "Showing the full imported range again", kind="neutral")
+        self.toast.show_toast("Filter cleared", "Showing the full imported range again", kind="neutral",
+                              anchor=self.left_panel.timeframe_selector.clear_button)
 
     def _on_notes_exported(self, filepath: str) -> None:
         import os
-        self.toast.show_toast("Session notes exported", os.path.basename(filepath), kind="success")
+        self.toast.show_toast("Session notes exported", os.path.basename(filepath), kind="success",
+                              anchor=self.left_panel.session_notes.export_btn)
 
     # -- Flags (manual only) -------------------------------------------------------
 
@@ -500,15 +604,32 @@ class MainWindow(QMainWindow):
             was_added = True
         self._apply_flag_anchors()
         self._recompute_stats()
+        flag_anchor_widget = self.sender()  # the LogWindowWidget whose row was flagged
         if was_added:
-            self.toast.show_toast("Flag added", entry.source_label, kind="success")
+            self.toast.show_toast("Flag added", entry.source_label, kind="success", anchor=flag_anchor_widget)
         else:
-            self.toast.show_toast("Flag removed", entry.source_label, kind="neutral")
+            self.toast.show_toast("Flag removed", entry.source_label, kind="neutral", anchor=flag_anchor_widget)
 
     def _apply_flag_anchors(self) -> None:
         for panel in self.log_panels.values():
             panel.set_flag_anchors(self._flag_anchors)
         self.visualization_row.set_flag_anchors(self._flag_anchors)
+
+    def _on_clear_all_flags(self) -> None:
+        """Removes every flag in the session at once — same underlying state
+        (_flag_anchors) and same apply/recompute path as toggling a single
+        flag, just emptying the list instead of adding/removing one entry.
+        """
+        if not self._flag_anchors:
+            self.toast.show_toast("No flags to clear", kind="neutral", anchor=self.top_nav.clear_flags_button)
+            return
+        count = len(self._flag_anchors)
+        self._flag_anchors = []
+        self._apply_flag_anchors()
+        self._recompute_stats()
+        noun = "flag" if count == 1 else "flags"
+        self.toast.show_toast("Flags cleared", f"{count} {noun} removed", kind="success",
+                              anchor=self.top_nav.clear_flags_button)
 
     # -- Sync scroll → unified time-based lock ------------------------------------
 
@@ -525,11 +646,12 @@ class MainWindow(QMainWindow):
                 self.top_nav.force_sync_off()
                 return
             self._enter_lock_mode()
-            self.toast.show_toast("Sync scroll on", "Every open window now scrolls together", kind="success")
+            self.toast.show_toast("Sync scroll on", "Every open window now scrolls together", kind="success",
+                                  anchor=self.top_nav.sync_scroll_button)
         else:
             if self._locked:
                 self._exit_lock_mode()
-                self.toast.show_toast("Sync scroll off", kind="neutral")
+                self.toast.show_toast("Sync scroll off", kind="neutral", anchor=self.top_nav.sync_scroll_button)
 
     def _enter_lock_mode(self) -> None:
         self._locked = True
@@ -635,12 +757,16 @@ class MainWindow(QMainWindow):
         self.color_map.remove(source_label)
         self.left_panel.tab_manager.remove_tab(source_label)
         self._scroll_sync.unregister_window(source_label)
+        self._update_workspace_empty_state()
 
         if f"· {source_label}" in self.event_detail_panel.header_label.text():
             self.event_detail_panel.clear()
 
         self._refresh_visualization()
         self._recompute_stats()
+        # No anchor: whatever triggered this (the panel's close button) no
+        # longer exists by this point, so this one intentionally falls back
+        # to the corner rather than anchoring to something already gone.
         self.toast.show_toast("Log window closed", source_label, kind="neutral")
 
     def _on_restore_size_requested(self, source_label: str) -> None:
@@ -649,7 +775,7 @@ class MainWindow(QMainWindow):
             return
         sub.showNormal()
         sub.resize(480, 380)
-        self.toast.show_toast("Window restored", source_label, kind="info")
+        self.toast.show_toast("Window restored", source_label, kind="info", anchor=self.sender())
 
     # -- Pop-out / dock-back -------------------------------------------------------
 
@@ -668,12 +794,12 @@ class MainWindow(QMainWindow):
             self.panels_area.removeSubWindow(sub)
             sub.deleteLater()
 
-        floating = FloatingLogWindow(panel, source_label, parent=None)
+        floating = FloatingLogWindow(panel, source_label, theme=THEMES[self._current_theme], parent=None)
         floating.redock_requested.connect(self._on_redock_requested)
         floating.closed.connect(self._on_floating_closed)
         self.floating_windows[source_label] = floating
         floating.show()
-        self.toast.show_toast("Popped out", source_label, kind="info")
+        self.toast.show_toast("Popped out", source_label, kind="info", anchor=self.sender())
 
     def _on_redock_requested(self, source_label: str) -> None:
         floating = self.floating_windows.pop(source_label, None)
@@ -685,7 +811,7 @@ class MainWindow(QMainWindow):
         floating.close()
         self._mount_in_mdi(panel, source_label)
         self._auto_tile()
-        self.toast.show_toast("Docked back", source_label, kind="info")
+        self.toast.show_toast("Docked back", source_label, kind="info", anchor=panel)
 
     def _on_floating_closed(self, source_label: str) -> None:
         self._on_panel_closed(source_label)

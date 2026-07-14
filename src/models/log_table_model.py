@@ -72,6 +72,40 @@ class LogTableModel(QAbstractTableModel):
         # real selection on every panel as soon as it's created.
         self._display_tz = "Australia/Perth"
 
+        # Themeable row colors — instance state so different open panels
+        # could theoretically use different themes, though in practice
+        # MainWindow applies the same theme to all of them. Defaults match
+        # the module constants above exactly, so nothing changes unless
+        # set_theme() is explicitly called. This is a color-only override —
+        # it does not touch which rows get flagged/matched/selected, only
+        # what color is RETURNED for a row already in one of those states.
+        self._color_highlighted_bg = COLOR_HIGHLIGHTED_BG
+        self._color_highlighted_text = COLOR_HIGHLIGHTED_TEXT
+        self._color_selected_bg = COLOR_SELECTED_BG
+        self._color_selected_text = COLOR_SELECTED_TEXT
+        self._color_default_text = COLOR_DEFAULT_TEXT
+        self._color_flag_bg = COLOR_FLAG_BG
+        self._color_flag_text = QColor("#ffd60a")
+
+    def set_theme(self, theme: dict) -> None:
+        """Swaps the color-only instance state above for theme-provided
+        values. Does not read or change _matched_indices, _selected_row,
+        _flag_anchors, _display_tz, or any timestamp/filter logic — those
+        are untouched by this method entirely.
+        """
+        self._color_highlighted_bg = QColor(theme["row_highlighted_bg"])
+        self._color_highlighted_text = QColor(theme["row_highlighted_text"])
+        self._color_selected_bg = QColor(theme["row_selected_bg"])
+        self._color_selected_text = QColor(theme["row_selected_text"])
+        self._color_default_text = QColor(theme["row_default_text"])
+        self._color_flag_bg = QColor(theme["row_flag_bg"])
+        self._color_flag_text = QColor(theme["row_flag_text"])
+        # Notify the view so already-visible rows repaint with the new colors.
+        if self.rowCount() > 0:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole, Qt.ForegroundRole])
+
     # -- Qt required overrides -------------------------------------------------
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -123,26 +157,26 @@ class LogTableModel(QAbstractTableModel):
             # Flags sit ABOVE selection/highlight so a flagged row stays
             # visually distinct regardless of the current filter or selection.
             if self._is_flagged_row(index.row()):
-                return COLOR_FLAG_BG
+                return self._color_flag_bg
             if index.row() == self._selected_row:
-                return COLOR_SELECTED_BG
+                return self._color_selected_bg
             if index.row() in self._matched_indices:
-                return COLOR_HIGHLIGHTED_BG
+                return self._color_highlighted_bg
             return None
 
         if role == Qt.ForegroundRole:
             # Highlight the flag glyph / timestamp of a flagged row.
             if column_key == "timestamp" and self._is_flagged_row(index.row()):
-                return QColor("#ffd60a")
+                return self._color_flag_text
             if column_key == "status":
                 status_value = entry.fields.get("status", "")
                 if status_value in STATUS_COLORS:
                     return STATUS_COLORS[status_value]
             if index.row() == self._selected_row:
-                return COLOR_SELECTED_TEXT
+                return self._color_selected_text
             if index.row() in self._matched_indices:
-                return COLOR_HIGHLIGHTED_TEXT
-            return COLOR_DEFAULT_TEXT
+                return self._color_highlighted_text
+            return self._color_default_text
 
         return None
 

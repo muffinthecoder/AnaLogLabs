@@ -14,10 +14,11 @@ Controls, left to right:
     Session stats        — Total / Highlighted / Flagged, live-updated.
 """
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QComboBox, QFrame
 
 from src.normaliser.timezone_map import SUPPORTED_TIMEZONES, DEFAULT_TIMEZONE
+from src.ui.theme import THEMES, THEME_LABELS, DEFAULT_THEME
 
 
 class TopNavBar(QWidget):
@@ -25,16 +26,22 @@ class TopNavBar(QWidget):
 
     import_logs_clicked = Signal()
     sync_scroll_toggled = Signal(bool)
-    display_timezone_changed = Signal(str)   # IANA name — the "convert to" zone
+    display_timezone_changed = Signal(str)  # IANA name — the "convert to" zone
+    theme_changed = Signal(str)  # theme key — see theme.py
+    clear_flags_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("TopNavBar")
+        # Plain QWidget subclasses don't paint a QSS background-color at all
+        # unless this is set — without it, a theme's nav_bg color silently
+        # falls through to whatever's behind it instead of actually applying.
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(46)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(6)
 
         logo = QLabel("AnaLog Labs")
         logo.setObjectName("LogoLabel")
@@ -60,14 +67,15 @@ class TopNavBar(QWidget):
         # ONE display-timezone dropdown ("convert to"). Raw "Z" timestamps are
         # UTC and non-"Z" timestamps are Perth local — that assumption is fixed
         # in the parser, so there is no separate "original timezone" control.
-        #layout.addWidget(self._tz_caption("Convert to"))
+        # layout.addWidget(self._tz_caption("Convert to"))
         convert_label = QLabel("Convert to")
-        
+
         # Update its style to pure white (keeping whatever font size is already there)
-        convert_label.setStyleSheet("color: #ffffff; font-size: 12px;") 
-        
+        convert_label.setStyleSheet("color: #ffffff; font-size: 13px; background: transparent;")
+
         layout.addWidget(convert_label)
         self.display_tz_dropdown = QComboBox()
+        self.display_tz_dropdown.setMaximumWidth(170)
         for iana, label in SUPPORTED_TIMEZONES.items():
             self.display_tz_dropdown.addItem(label, iana)
         # Default display = Perth (the client's primary zone; matches the "+8"
@@ -78,15 +86,36 @@ class TopNavBar(QWidget):
         )
         layout.addWidget(self.display_tz_dropdown)
 
+        self._add_separator(layout)
+
+        theme_label = QLabel("Theme")
+        theme_label.setStyleSheet("color: #ffffff; font-size: 13px; background: transparent;")
+        layout.addWidget(theme_label)
+        self.theme_dropdown = QComboBox()
+        self.theme_dropdown.setMaximumWidth(110)
+        for key in THEMES:
+            self.theme_dropdown.addItem(THEME_LABELS.get(key, key), key)
+        self._select(self.theme_dropdown, DEFAULT_THEME)
+        self.theme_dropdown.currentIndexChanged.connect(
+            lambda _i: self.theme_changed.emit(self.theme_dropdown.currentData())
+        )
+        layout.addWidget(self.theme_dropdown)
+
         layout.addStretch()
 
         # Live session stats.
         self.total_label = self._stat_label("Total", "0", "#00c4e8")
         self.highlighted_label = self._stat_label("Highlighted", "0", "#ffd60a")
-        self.flagged_label = self._stat_label("Flagged", "0", "#e8b840")        
-        
+        self.flagged_label = self._stat_label("Flagged", "0", "#e8b840")
+
         for w in (self.total_label, self.highlighted_label, self.flagged_label):
             layout.addWidget(w)
+
+        self.clear_flags_button = QPushButton("Clear flags")
+        self.clear_flags_button.setToolTip("Remove every flag in this session")
+        self.clear_flags_button.setMaximumWidth(90)
+        self.clear_flags_button.clicked.connect(self.clear_flags_clicked.emit)
+        layout.addWidget(self.clear_flags_button)
 
     # -- construction helpers --------------------------------------------------
 
@@ -99,14 +128,14 @@ class TopNavBar(QWidget):
 
     def _tz_caption(self, text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("font-size: 10px; color: #5a6a8a;")
+        label.setStyleSheet("font-size: 11px; color: #5a6a8a;")
         return label
 
     def _stat_label(self, caption: str, value: str, color: str) -> QLabel:
         label = QLabel()
         label.setProperty("caption", caption)
         label.setProperty("color", color)
-        label.setStyleSheet("font-size: 11px; color: #8090b0;")
+        label.setStyleSheet("font-size: 12px; color: #8090b0;")
         self._render_stat(label, value)
         return label
 
@@ -151,6 +180,14 @@ class TopNavBar(QWidget):
         self.display_tz_dropdown.blockSignals(True)
         self._select(self.display_tz_dropdown, iana_tz)
         self.display_tz_dropdown.blockSignals(False)
+
+    def set_current_theme(self, theme_key: str) -> None:
+        """Programmatically reflects an externally-set theme (e.g. restored
+        from saved settings at startup) without re-emitting theme_changed.
+        """
+        self.theme_dropdown.blockSignals(True)
+        self._select(self.theme_dropdown, theme_key)
+        self.theme_dropdown.blockSignals(False)
 
     def force_sync_off(self) -> None:
         """Reset the sync toggle to OFF without emitting toggled — used after
