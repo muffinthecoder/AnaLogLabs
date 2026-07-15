@@ -25,10 +25,12 @@ from collections import defaultdict
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QRadialGradient, QGradient, QBrush, QCursor
-from PySide6.QtWidgets import QToolTip
+from PySide6.QtWidgets import QToolTip, QMenu, QApplication
 
 from src.models.data_classes import RawLogEntry
 from src.models.log_table_model import FLAG_WINDOW
+from src.normaliser.timezone_map import utc_offset_label
+from src.visualiser.axis_utils import choose_tick_count, evenly_spaced_fractions
 
 # Max entities to show on the Y-axis so it doesn't get cluttered
 MAX_ENTITIES = 8
@@ -44,6 +46,7 @@ OVERLAP_SPREAD_FRACTION = 0.34
 
 Y_AXIS_WIDTH = 140  # widened so entity names truncate less aggressively
 Y_LABEL_ELIDE_CHARS = 18
+ZOOM_BTN_FACTOR = 0.85  # matches ZOOM_FACTOR in the other two charts, for a consistent zoom step
 
 # Matches the heatmap's ROW_HEIGHT so both charts share the same vertical
 # rhythm — the eye should read them as one system, not two different widgets.
@@ -52,6 +55,10 @@ TOP_PAD = 4
 AXIS_HEIGHT = 16
 
 FLAG_GLOW_COLOR = "#ffffff"
+
+# Cross-chart hover sync (see VisualizationRow._on_chart_hover) — same
+# neutral off-white used on the other two charts.
+HOVER_SYNC_LINE_COLOR = "#e8ecf5"
 
 # Only the single busiest bubbles glow for "activity" — a relative percentage
 # threshold looked fine in isolation but let too MANY bubbles qualify at once
@@ -67,6 +74,11 @@ class BubbleChart(pg.PlotWidget):
 
     # (source_label, utc_datetime) — emitted when a bubble is clicked.
     element_clicked = Signal(str, object)
+    # utc_datetime | None — emitted on hover so the OTHER two charts can draw
+    # a synced highlight at the same moment (see VisualizationRow._on_chart_hover).
+    hover_moved = Signal(object)
+    # (source_label, utc_datetime) — "Flag this event" from the right-click menu.
+    flag_requested = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,7 +93,14 @@ class BubbleChart(pg.PlotWidget):
         self._range_start: datetime | None = None
         self._range_end: datetime | None = None
         self._entity_names: list[str] = []
+        self._entity_totals: dict[str, int] = {}
+        self._entity_rank: dict[str, int] = {}
         self._flag_anchors: list[datetime] = []
+        # Right-click has no natural "what's under the cursor" query on a
+        # pyqtgraph ScatterPlotItem the way the QPainter charts' _hit_test
+        # does, so the context menu acts on whatever the mouse was hovering
+        # most recently — kept in sync by _on_scatter_hovered.
+        self._last_hovered_data: dict | None = None
 
         # Themeable — see ActivityHeatmap.set_theme for why these need to be
         # instance state rather than the module constants they default to.
@@ -146,6 +165,15 @@ class BubbleChart(pg.PlotWidget):
         self._empty_text = pg.TextItem("No log data loaded", color=self._empty_state_text, anchor=(0.5, 0.5))
         self.addItem(self._empty_text)
 
+        # Cross-chart hover sync guide — one persistent line, moved/shown or
+        # hidden by set_external_highlight() rather than recreated each time.
+        self._highlight_line = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen(HOVER_SYNC_LINE_COLOR, width=2, style=Qt.DashLine),
+        )
+        self._highlight_line.setVisible(False)
+        self.addItem(self._highlight_line)
+
     def set_theme(self, theme: dict) -> None:
         """See ActivityHeatmap.set_theme — pyqtgraph's axis pens and TextItem
         color are also set once at creation time, not re-read from QSS, so
@@ -167,6 +195,11 @@ class BubbleChart(pg.PlotWidget):
         self.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_color))
         self.getAxis("left").setTextPen(pg.mkPen(self._axis_text_color))
         self._empty_text.setColor(self._empty_state_text)
+        # See ActivityHeatmap.set_theme for why accent (not a fixed color)
+        # is used for the cross-chart hover sync line — a fixed near-white
+        # was invisible against the "original"/"coral_reef" themes' light
+        # chart backgrounds.
+        self._highlight_line.setPen(pg.mkPen(theme["accent"], width=2, style=Qt.DashLine))
         self.setBackground(None)
         self._refresh_plot()
 
@@ -207,6 +240,96 @@ class BubbleChart(pg.PlotWidget):
 
     # -- Interactivity ----------------------------------------------------------
 
+    # -- Toolbar-driven zoom (button clicks, not scroll/drag) -------------------
+
+    def zoom_in(self) -> None:
+        """Scales the X (time) axis only — Y is a discrete entity list, so
+        scaling it doesn't mean anything the way it does for a continuous
+        time axis. Centered on the current view via pyqtgraph's default.
+        """
+        self.getViewBox().scaleBy((ZOOM_BTN_FACTOR, 1.0))
+
+    def zoom_out(self) -> None:
+        self.getViewBox().scaleBy((1.0 / ZOOM_BTN_FACTOR, 1.0))
+
+    def reset_view(self) -> None:
+        """Re-derives the X/Y range from the current investigation range —
+        pyqtgraph's own 'View All' autoRange() would fit to the bubbles'
+        bounding box instead, which isn't the same as the actual filtered
+        range this chart represents.
+        """
+        self._refresh_plot()
+
+    def set_external_highlight(self, anchor_dt: datetime | None) -> None:
+        """Called by VisualizationRow when a SIBLING chart is being hovered,
+        so this chart can draw a synced vertical guide at the matching
+        absolute moment (or hide it when anchor_dt is None / hover leaves).
+        Entirely separate from this widget's OWN hover state — never emits
+        hover_moved itself, so there's no feedback loop between charts.
+        """
+        if anchor_dt is None:
+            self._highlight_line.setVisible(False)
+            return
+        if self._range_start is not None and self._range_end is not None:
+            if not (self._range_start <= anchor_dt <= self._range_end):
+                self._highlight_line.setVisible(False)
+                return
+        self._highlight_line.setPos(anchor_dt.timestamp())
+        self._highlight_line.setVisible(True)
+
+    def _resolve_flag_anchor(self, data: dict) -> datetime | None:
+        """Finds one REAL entry's exact (ms-precise) timestamp within the
+        bucket a bubble represents, for use as a flag anchor.
+
+        Each bubble is an AGGREGATE of every entry for (entity, source,
+        bucket) — its plotted utc_dt is the bucket's geometric center
+        (occasionally nudged for overlap spreading), not any actual row's
+        timestamp. Flagging needs to land within FLAG_WINDOW (±30s) of a
+        real row, and on a wide investigation range a bucket can span
+        minutes, so the center can silently miss every real entry it
+        represents. This scans for one real matching entry instead.
+        """
+        source_label = data["source_label"]
+        entity = data["entity"]
+        bucket_idx = data.get("bucket_idx")
+        if bucket_idx is None or self._range_start is None or self._range_end is None:
+            return None
+        duration = (self._range_end - self._range_start).total_seconds()
+        bucket_size = duration / TIME_BUCKETS
+        bucket_start = self._range_start + timedelta(seconds=bucket_idx * bucket_size)
+        bucket_end = bucket_start + timedelta(seconds=bucket_size)
+        for entry in self._entries_by_source.get(source_label, []):
+            nts = entry.normalized_timestamp
+            if nts is None:
+                continue
+            t = nts.utc_datetime
+            if bucket_start <= t <= bucket_end and self._extract_entity(entry) == entity:
+                return t + timedelta(milliseconds=nts.milliseconds)
+        return None
+
+    def _point_tooltip_text(self, data: dict) -> str:
+        """Builds the exact text shown in the hover tooltip — factored out
+        so the right-click 'Copy details' action can put IDENTICAL text on
+        the clipboard instead of duplicating this formatting.
+        """
+        tz = self._tz()
+        local_str = data["utc_dt"].astimezone(tz).strftime("%H:%M:%S")
+        flag_suffix = "\n⚑ Flagged event nearby" if data.get("flagged") else ""
+
+        entity = data["entity"]
+        entity_total = self._entity_totals.get(entity, data["count"])
+        rank = self._entity_rank.get(entity)
+        rank_note = f"  ·  #{rank} busiest entity" if rank else ""
+        bubble_share_pct = (data["count"] / entity_total * 100) if entity_total else 100
+
+        return (
+            f"{entity}{rank_note}\n"
+            f"{data['source_label']}  ·  {data['count']} event{'s' if data['count'] != 1 else ''} "
+            f"({bubble_share_pct:.0f}% of this entity's {entity_total} total)\n"
+            f"{local_str}  ({utc_offset_label(self._display_tz)})"
+            f"{flag_suffix}"
+        )
+
     def _on_scatter_clicked(self, plot, points, ev=None) -> None:
         if not points:
             return
@@ -218,19 +341,39 @@ class BubbleChart(pg.PlotWidget):
     def _on_scatter_hovered(self, plot, points, ev=None) -> None:
         if not points:
             QToolTip.hideText()
+            self._last_hovered_data = None
+            self.hover_moved.emit(None)
             return
         data = points[0].data()
         if not data:
             return
-        tz = self._tz()
-        local_str = data["utc_dt"].astimezone(tz).strftime("%H:%M:%S")
-        flag_suffix = "\n⚑ flagged" if data.get("flagged") else ""
-        text = (
-            f"{data['entity']}\n"
-            f"{data['source_label']}  ·  {data['count']} event{'s' if data['count'] != 1 else ''}\n"
-            f"{local_str}{flag_suffix}"
-        )
-        QToolTip.showText(QCursor.pos(), text, self)
+        self._last_hovered_data = data
+        QToolTip.showText(QCursor.pos(), self._point_tooltip_text(data), self)
+        self.hover_moved.emit(data["utc_dt"])
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
+        self._last_hovered_data = None
+        self.hover_moved.emit(None)
+        super().leaveEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        """Right-click menu: Copy details / Flag this event, mirroring the
+        other two charts' context menus. Acts on whichever bubble was
+        hovered most recently (see _last_hovered_data) since pyqtgraph has
+        no direct 'what's under this exact pixel' query the way the
+        QPainter charts' _hit_test does.
+        """
+        data = self._last_hovered_data
+        if not data:
+            return
+        menu = QMenu(self)
+        text = self._point_tooltip_text(data)
+        menu.addAction("Copy details", lambda: QApplication.clipboard().setText(text))
+        anchor = self._resolve_flag_anchor(data)
+        if anchor is not None:
+            menu.addAction("Flag this event", lambda: self.flag_requested.emit(data["source_label"], anchor))
+        menu.exec(event.globalPos())
 
     def _tz(self):
         import pytz
@@ -347,6 +490,12 @@ class BubbleChart(pg.PlotWidget):
         self._entity_names = entity_names
         self._resize_for_rows(len(entity_names))
 
+        # Kept for the hover tooltip — "this entity is #2 busiest, with N
+        # total events across the range" needs the full ranking, not just
+        # which row it's drawn on.
+        self._entity_totals = dict(entity_totals)
+        self._entity_rank = {name: i + 1 for i, (name, _) in enumerate(top_entities)}
+
         # Map entity name to Y-axis coordinate (0 to N)
         y_map = {name: i for i, name in enumerate(entity_names)}
 
@@ -425,6 +574,7 @@ class BubbleChart(pg.PlotWidget):
                         'count': count,
                         'utc_dt': datetime.fromtimestamp(x_ts, tz=timezone.utc),
                         'flagged': flagged,
+                        'bucket_idx': b_idx,
                     },
                 })
 
@@ -464,17 +614,24 @@ class BubbleChart(pg.PlotWidget):
         # Y-Axis: Entities (elided — full name available via hover tooltip on the bubble)
         y_ticks = [[(i, self._elide(name, Y_LABEL_ELIDE_CHARS)) for name, i in y_map.items()]]
         self.getAxis("left").setTicks(y_ticks)
+        self.getAxis("left").setLabel("Top entities (users / IPs)", color=self._axis_text_color, **{"font-size": "9px"})
 
-        # X-Axis: Time (Start, Mid, End)
-        mid_ts = range_start_ts + (duration / 2)
-        # Formatting to HH:MM:SS for simplicity
+        # X-Axis: density-aware ticks (more of them the wider this widget is,
+        # e.g. popped out) instead of a fixed start/mid/end. Formatting is
+        # left exactly as it was (system local time via datetime.fromtimestamp
+        # with no tz arg) — only the NUMBER of ticks changed here, not how
+        # they're converted, since timezone handling isn't something this
+        # pass should touch.
+        plot_width_px = max(self.width() - Y_AXIS_WIDTH - 20, 50)
+        tick_count = choose_tick_count(plot_width_px)
+        fractions = evenly_spaced_fractions(tick_count)
         fmt = lambda t: datetime.fromtimestamp(t).strftime("%H:%M:%S")
         x_ticks = [[
-            (range_start_ts, fmt(range_start_ts)),
-            (mid_ts, fmt(mid_ts)),
-            (range_end_ts, fmt(range_end_ts)),
+            (range_start_ts + frac * duration, fmt(range_start_ts + frac * duration))
+            for frac in fractions
         ]]
         self.getAxis("bottom").setTicks(x_ticks)
+        self.getAxis("bottom").setLabel("Time", color=self._axis_text_color, **{"font-size": "9px"})
 
         # Set plot limits so bubbles don't clip on the edges
         self.setXRange(range_start_ts - (bucket_size / 2), range_end_ts + (bucket_size / 2), padding=0.05)

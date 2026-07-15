@@ -39,6 +39,36 @@ def _export_widget(widget: QWidget, title: str):
         pixmap.save(filename)
 
 
+# One-to-two-line descriptions shown under the title once a chart is popped
+# out — matched against the section title strings VisualizationRow already
+# assigns each chart (see _titled() below), so no extra wiring is needed
+# per-chart. Kept here rather than on each chart class since this is purely
+# about orienting the investigator in the floating window, not the chart's
+# own behavior.
+_CHART_DESCRIPTIONS = {
+    "heatmap": (
+        "Shows when each file is busiest across a 24-hour day, aggregated over the "
+        "entire imported range. Brighter cells mean more events at that time of day for that file."
+    ),
+    "spike": (
+        "Stacked event volume across the current investigation range, broken down by source file. "
+        "Tall spikes highlight bursts of activity worth a closer look."
+    ),
+    "bubble": (
+        "Plots the busiest users/IPs over time — bubble size is event volume, colour is source file. "
+        "One huge bubble suggests brute force; many small ones at once suggests spraying or lateral movement."
+    ),
+}
+
+
+def _describe_chart(title: str) -> str:
+    lower = title.lower()
+    for key, text in _CHART_DESCRIPTIONS.items():
+        if key in lower:
+            return text
+    return "Detached chart view — close this window to return it to the dashboard."
+
+
 class FloatingChartWindow(QWidget):
     """A resizable floating window that temporarily holds a popped-out chart.
 
@@ -50,6 +80,11 @@ class FloatingChartWindow(QWidget):
     stylesheet (re-applied by set_theme()) covering the exact chart-panel
     rule the chart widget needs, plus tracking so MainWindow's theme switch
     can reach any currently-open one of these.
+
+    Also carries the popped-out-only interaction toolbar (zoom in/out, reset
+    view, fullscreen, export) — deliberately NOT present on the embedded
+    dashboard charts, since that space is too tight for it and scroll/drag
+    already cover zoom/pan there.
     """
 
     closed = Signal(object)  # self — lets VisualizationRow prune its tracking list
@@ -64,27 +99,90 @@ class FloatingChartWindow(QWidget):
 
         self.setWindowTitle(title)
         self.resize(1000, 600)  # Open nice and large for the ISOO
-        # Header for the floating window
-        layout = QVBoxLayout(self)
-        header_layout = QHBoxLayout()
 
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        # -- Header: title + a 1-2 line explanation of what this chart shows ----
+        # Every row below is added with its DEFAULT stretch (0) — only the
+        # chart widget at the bottom gets stretch=1, so 100% of any leftover
+        # window space goes to the chart instead of being split evenly across
+        # every row (which was silently padding the title/subheading/toolbar
+        # rows with dead space instead of growing the chart).
+        header_layout = QHBoxLayout()
         self._title_lbl = QLabel(title)
         header_layout.addWidget(self._title_lbl)
         header_layout.addStretch()
+        layout.addLayout(header_layout, 0)
 
-        # The Export Button is now here, clearly visible
+        self._subheading_lbl = QLabel(_describe_chart(title))
+        self._subheading_lbl.setWordWrap(True)
+        layout.addWidget(self._subheading_lbl, 0)
+
+        # -- Toolbar: the actual chart-relevant interactions, not a generic --
+        # Every chart class (ActivityHeatmap, SpikeChart, BubbleChart) now
+        # exposes the same zoom_in()/zoom_out()/reset_view() API regardless
+        # of whether it's QPainter- or PyQtGraph-based, so this toolbar
+        # doesn't need to know which chart it's attached to.
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.addStretch()
+
+        self._zoom_out_btn = QPushButton("−")
+        self._zoom_out_btn.setFixedSize(28, 24)
+        self._zoom_out_btn.setToolTip("Zoom out")
+        self._zoom_out_btn.clicked.connect(lambda: self._call_chart("zoom_out"))
+        toolbar_layout.addWidget(self._zoom_out_btn)
+
+        self._zoom_in_btn = QPushButton("+")
+        self._zoom_in_btn.setFixedSize(28, 24)
+        self._zoom_in_btn.setToolTip("Zoom in")
+        self._zoom_in_btn.clicked.connect(lambda: self._call_chart("zoom_in"))
+        toolbar_layout.addWidget(self._zoom_in_btn)
+
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setFixedSize(56, 24)
+        self._reset_btn.setToolTip("Reset zoom/pan back to the full view")
+        self._reset_btn.clicked.connect(lambda: self._call_chart("reset_view"))
+        toolbar_layout.addWidget(self._reset_btn)
+
+        self._fullscreen_btn = QPushButton("Fullscreen")
+        self._fullscreen_btn.setFixedSize(78, 24)
+        self._fullscreen_btn.setToolTip("Toggle fullscreen")
+        self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+        toolbar_layout.addWidget(self._fullscreen_btn)
+
         self._export_btn = QPushButton("Export")
         self._export_btn.setFixedSize(80, 24)
+        self._export_btn.setToolTip("Save this chart as a PNG")
         self._export_btn.clicked.connect(lambda: _export_widget(self.chart_widget, title))
-        header_layout.addWidget(self._export_btn)
+        toolbar_layout.addWidget(self._export_btn)
 
-        layout.addLayout(header_layout)
-        layout.addWidget(self.chart_widget)
+        layout.addLayout(toolbar_layout, 0)
+        layout.addWidget(self.chart_widget, 1)
 
         self.chart_widget.show()
         self.stack.setCurrentIndex(1)
 
         self.set_theme(theme or _FALLBACK_THEME)
+
+    def _call_chart(self, method_name: str) -> None:
+        """Defensive dispatch to the chart's zoom/reset method — guards
+        against a future chart type being popped out here without yet
+        implementing the shared toolbar API, rather than crashing the
+        floating window on a button click.
+        """
+        method = getattr(self.chart_widget, method_name, None)
+        if callable(method):
+            method()
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+            self._fullscreen_btn.setText("Fullscreen")
+        else:
+            self.showMaximized()
+            self._fullscreen_btn.setText("Restore")
 
     def set_theme(self, theme: dict) -> None:
         """Re-styles this window's own chrome AND re-establishes the chart
@@ -95,12 +193,18 @@ class FloatingChartWindow(QWidget):
         accent = theme["accent"]
         bg_input = theme["bg_input"]
         text_primary = theme["text_primary"]
+        text_secondary = theme["text_secondary"]
         bg_app = theme["bg_app"]
 
         self._title_lbl.setStyleSheet(f"font-weight: bold; color: {accent};")
-        self._export_btn.setStyleSheet(
+        self._subheading_lbl.setStyleSheet(f"font-size: 11px; color: {text_secondary};")
+
+        toolbar_btn_style = (
             f"background-color: {bg_input}; color: {text_primary}; border: 1px solid {accent}; border-radius: 6px;"
         )
+        for btn in (self._zoom_out_btn, self._zoom_in_btn, self._reset_btn,
+                    self._fullscreen_btn, self._export_btn):
+            btn.setStyleSheet(toolbar_btn_style)
 
         heat_bg, heat_border = theme["chart_heat_bg"], theme["chart_heat_border"]
         spike_bg, spike_border = theme["chart_spike_bg"], theme["chart_spike_border"]
@@ -219,6 +323,13 @@ class VisualizationRow(QWidget):
 
     # Relayed from whichever chart was clicked — (source_label, utc_datetime).
     element_clicked = Signal(str, object)
+    # Relayed from whichever chart's right-click "Flag this event" fired —
+    # (source_label, utc_datetime). MainWindow owns the actual flag list.
+    flag_requested = Signal(str, object)
+    # Chart title — fired when a chart is popped out / docked back, purely
+    # for MainWindow to show a toast (mirrors the existing log-window ones).
+    chart_popped_out = Signal(str)
+    chart_docked_back = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,6 +345,20 @@ class VisualizationRow(QWidget):
         self.heatmap.element_clicked.connect(self.element_clicked)
         self.spike.element_clicked.connect(self.element_clicked)
         self.bubble.element_clicked.connect(self.element_clicked)
+
+        # Relay each chart's right-click "Flag this event" straight through.
+        self.heatmap.flag_requested.connect(self.flag_requested)
+        self.spike.flag_requested.connect(self.flag_requested)
+        self.bubble.flag_requested.connect(self.flag_requested)
+
+        # Cross-chart hover sync — hovering a moment on ANY one of the three
+        # draws a matching highlight guide on the other two. Works whether
+        # a chart is currently embedded or popped out, since popping out
+        # reparents the same widget instance rather than creating a copy —
+        # these connections don't care where the widget currently lives.
+        self.heatmap.hover_moved.connect(self._on_chart_hover)
+        self.spike.hover_moved.connect(self._on_chart_hover)
+        self.bubble.hover_moved.connect(self._on_chart_hover)
 
         # 1. Install Event Filters to listen for double-clicks on the charts
         self.heatmap.installEventFilter(self)
@@ -317,6 +442,7 @@ class VisualizationRow(QWidget):
                     fw.closed.connect(self._on_floating_chart_closed)
                     self._floating_windows.append(fw)
                     fw.show()
+                    self.chart_popped_out.emit(obj._chart_title)
 
                     return True  # Consume the double-click event
 
@@ -325,10 +451,15 @@ class VisualizationRow(QWidget):
     def _on_floating_chart_closed(self, fw) -> None:
         """Stops tracking a floating chart window once closed, so a later
         theme switch doesn't try to restyle (or hold a dangling reference
-        to) a window that no longer exists.
+        to) a window that no longer exists. Closing IS docking back for
+        charts (there's no separate redock button like log windows have —
+        the chart snaps back into the embedded stack in FloatingChartWindow's
+        own closeEvent before this runs), so this is also where the
+        docked-back toast fires from.
         """
         if fw in self._floating_windows:
             self._floating_windows.remove(fw)
+        self.chart_docked_back.emit(fw._title)
 
     # -- Public API (driven by MainWindow) -------------------------------------
 
@@ -397,6 +528,20 @@ class VisualizationRow(QWidget):
         self.legend.set_items({})
 
     # -- Internal ----------------------------------------------------------------
+
+    def _on_chart_hover(self, anchor_ts) -> None:
+        """Cross-chart hover sync — whichever chart just fired hover_moved
+        pushes its anchor (or None, on hover-out) to the OTHER two so they
+        can draw a matching guide line. self.sender() identifies which chart
+        originated this call, exactly like ScrollSyncManager identifies the
+        source window — the difference here is there's no recursion risk to
+        guard against, since set_external_highlight() is a distinct code
+        path from the one that emits hover_moved in the first place.
+        """
+        sender = self.sender()
+        for chart in (self.heatmap, self.spike, self.bubble):
+            if chart is not sender:
+                chart.set_external_highlight(anchor_ts)
 
     def _on_source_toggled(self, source_label: str) -> None:
         """Legend click — show/hide one source across all three charts without

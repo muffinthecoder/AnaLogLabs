@@ -31,12 +31,14 @@ Interactivity (visual layer only — no data/time logic changes):
 from datetime import datetime, timedelta
 
 import pytz
-from PySide6.QtCore import Qt, QRectF, Signal
-from PySide6.QtGui import QColor, QPainter, QFont
-from PySide6.QtWidgets import QWidget, QToolTip
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtGui import QColor, QPainter, QFont, QPen
+from PySide6.QtWidgets import QWidget, QToolTip, QMenu, QApplication
 
 from src.models.data_classes import RawLogEntry
 from src.models.log_table_model import FLAG_WINDOW
+from src.normaliser.timezone_map import utc_offset_label
+from src.visualiser.axis_utils import choose_tick_count, evenly_spaced_fractions, format_timeofday_tick
 
 # 48 half-hour buckets across the day give a readable "busy period" resolution.
 BUCKETS_PER_DAY = 48
@@ -47,8 +49,9 @@ MAX_ALPHA = 245
 
 ROW_HEIGHT = 22
 LABEL_GUTTER = 132   # left area: colour dot + file name (widened so more sources stay readable)
-AXIS_HEIGHT = 16
+AXIS_HEIGHT = 28     # tick-label row + a second row for the axis title
 TOP_PAD = 4
+AXIS_TITLE_COLOR_ALPHA = 170
 
 CELL_RADIUS = 3.0
 EMPTY_CELL_OUTLINE = "#1c2740"   # faint outline so zero-activity buckets still read as grid
@@ -60,6 +63,17 @@ LABEL_ELIDE_CHARS = 17
 FLAG_GLOW_COLOR = "#ffffff"
 GLOW_LAYERS = 4          # concentric translucent layers simulating a soft blur
 GLOW_MAX_PAD = 5.0        # how far the outermost glow layer extends past the cell
+
+# Cross-chart hover sync (see VisualizationRow._on_chart_hover) — a dashed
+# vertical guide drawn when the SAME moment is currently hovered on one of
+# the *other* two charts. Deliberately a neutral off-white rather than any
+# source's own hue, so it never looks like a real data cue.
+# Cross-chart hover sync (see VisualizationRow._on_chart_hover) — color is
+# set from the active theme's accent (see set_theme()), not fixed here. A
+# fixed near-white line was invisible against the "original"/"coral_reef"
+# themes' light chart backgrounds; this constant only serves as the
+# pre-set_theme() fallback before any theme has been applied.
+HOVER_SYNC_LINE_COLOR = "#e8ecf5"
 
 # Subtler, colored glow for busy (but not necessarily flagged) cells — uses
 # each source's own hue rather than the reserved white flag color, and is
@@ -83,6 +97,11 @@ class ActivityHeatmap(QWidget):
 
     # (source_label, utc_datetime) — emitted on cell click for chart-to-log navigation.
     element_clicked = Signal(str, object)
+    # utc_datetime | None — emitted on hover so the OTHER two charts can draw
+    # a synced highlight at the same moment (see VisualizationRow._on_chart_hover).
+    hover_moved = Signal(object)
+    # (source_label, utc_datetime) — "Flag this event" from the right-click menu.
+    flag_requested = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -92,6 +111,10 @@ class ActivityHeatmap(QWidget):
         self._colors: dict[str, str] = {}
         self._display_tz = "Australia/Perth"
         self._flag_anchors: list[datetime] = []
+        # Set by VisualizationRow when the SAME moment is hovered on a
+        # sibling chart — draws a synced vertical guide, independent of this
+        # widget's own internal hover state.
+        self._external_highlight_dt: datetime | None = None
 
         # Zoom/pan view window, in fractional bucket indices [0, BUCKETS_PER_DAY].
         self._view_start = 0.0
@@ -111,9 +134,11 @@ class ActivityHeatmap(QWidget):
         self._label_text_color = LABEL_TEXT_COLOR
         self._empty_state_text = EMPTY_STATE_TEXT
         self._flag_glow_color = FLAG_GLOW_COLOR
+        self._hover_sync_color = HOVER_SYNC_LINE_COLOR
 
         self.setMinimumHeight(ROW_HEIGHT + AXIS_HEIGHT + TOP_PAD)
-        self.setToolTip("Activity by time of day — brighter = busier (per file). Scroll to zoom, drag to pan.")
+        # NOTE: deliberately no static setToolTip() here — see the matching
+        # note in SpikeChart.__init__.
 
     def set_theme(self, theme: dict) -> None:
         """Applies a theme dict (see theme.py) to this chart's internal
@@ -125,6 +150,12 @@ class ActivityHeatmap(QWidget):
         self._label_text_color = theme["chart_text"]
         self._empty_state_text = theme["chart_text_dim"]
         self._flag_glow_color = theme["flag_color"]
+        # Cross-chart hover sync line — theme["accent"] rather than a fixed
+        # color, since a fixed near-white was invisible against the
+        # "original"/"coral_reef" themes' light chart backgrounds. accent is
+        # already relied on elsewhere to read clearly against these exact
+        # backgrounds (section titles, borders), so it's a safe choice here too.
+        self._hover_sync_color = theme["accent"]
         self.update()
 
     # -- Public API ------------------------------------------------------------
@@ -321,7 +352,102 @@ class ActivityHeatmap(QWidget):
                 candidates.append(nts.utc_datetime)
         return min(candidates) if candidates else None
 
+    def _resolve_flag_anchor(self, label: str, bucket_idx: int) -> datetime | None:
+        """Same real entry as _first_entry_in_bucket, but WITH milliseconds
+        included, matching exactly how a normal row-click flag anchor is
+        built (utc_datetime + ms) — see SpikeChart._resolve_flag_anchor for
+        why flagging specifically needs this precision that navigation
+        doesn't.
+        """
+        tz = self._tz()
+        candidates = []
+        for entry in self._entries_by_source.get(label, []):
+            nts = entry.normalized_timestamp
+            if nts is None:
+                continue
+            local = nts.utc_datetime.astimezone(tz)
+            minute_of_day = local.hour * 60 + local.minute
+            idx = min(minute_of_day // MINUTES_PER_BUCKET, BUCKETS_PER_DAY - 1)
+            if idx == bucket_idx:
+                candidates.append(nts.utc_datetime + timedelta(milliseconds=nts.milliseconds))
+        return min(candidates) if candidates else None
+
+    def set_external_highlight(self, anchor_dt: datetime | None) -> None:
+        """Called by VisualizationRow when a SIBLING chart is being hovered,
+        so this chart can draw a synced vertical guide at the matching
+        time-of-day (or clear it when anchor_dt is None / hover leaves).
+        Entirely separate from this widget's OWN hover state — never emits
+        hover_moved itself, so there's no feedback loop between charts.
+        """
+        if self._external_highlight_dt == anchor_dt:
+            return
+        self._external_highlight_dt = anchor_dt
+        self.update()
+
+    def _cell_tooltip_text(self, label: str, bucket_idx: int, count: int) -> str:
+        """Builds the exact text shown in the hover tooltip — factored out
+        so the right-click 'Copy details' action can put IDENTICAL text on
+        the clipboard instead of duplicating this formatting.
+        """
+        start_minute = bucket_idx * MINUTES_PER_BUCKET
+        h, m = divmod(start_minute, 60)
+        end_h, end_m = divmod(start_minute + MINUTES_PER_BUCKET, 60)
+        time_range = f"{h:02d}:{m:02d}–{end_h:02d}:{end_m:02d}"
+        L = self._layout()
+        flagged = L["flagged_by_source"].get(label, [False] * BUCKETS_PER_DAY)[bucket_idx]
+
+        day_counts = L["counts_by_source"].get(label, [])
+        day_total = sum(day_counts)
+        row_peak = L["row_max"].get(label, 1)
+        share_pct = (count / day_total * 100) if day_total else 0
+        is_busiest = count > 0 and count == row_peak
+        peak_suffix = "  ★ peak" if is_busiest else ""
+        flag_suffix = "  ⚑" if flagged else ""
+
+        return (
+            f"{label}\n"
+            f"{time_range}  ·  {count} event{'s' if count != 1 else ''} "
+            f"({share_pct:.0f}%){peak_suffix}{flag_suffix}"
+        )
+
     # -- Mouse interaction: zoom / pan / hover / click ---------------------------
+
+    def zoom_in(self) -> None:
+        """Button-driven zoom (toolbar), centered on the current view."""
+        self._zoom_by(ZOOM_FACTOR)
+
+    def zoom_out(self) -> None:
+        self._zoom_by(1.0 / ZOOM_FACTOR)
+
+    def _zoom_by(self, factor: float) -> None:
+        view_start, view_end = self._effective_view()
+        span = view_end - view_start
+        center = (view_start + view_end) / 2
+
+        new_span = max(span * factor, MIN_VIEW_BUCKETS)
+        new_span = min(new_span, float(BUCKETS_PER_DAY))
+
+        new_start = center - new_span / 2
+        new_end = center + new_span / 2
+        if new_start < 0:
+            new_end -= new_start
+            new_start = 0.0
+        if new_end > BUCKETS_PER_DAY:
+            new_start -= (new_end - BUCKETS_PER_DAY)
+            new_end = float(BUCKETS_PER_DAY)
+
+        self._view_start = max(0.0, new_start)
+        self._view_end = min(float(BUCKETS_PER_DAY), new_end)
+        self.update()
+
+    def reset_view(self) -> None:
+        """Resets zoom/pan back to the full 24h view — same effect as
+        double-clicking, exposed for the floating-window toolbar's Home
+        button.
+        """
+        self._view_start = 0.0
+        self._view_end = float(BUCKETS_PER_DAY)
+        self.update()
 
     def wheelEvent(self, event) -> None:
         if not self._valid_sources():
@@ -380,29 +506,30 @@ class ActivityHeatmap(QWidget):
                     self._view_end = new_end
                     self.update()
             QToolTip.hideText()
+            self.hover_moved.emit(None)
             super().mouseMoveEvent(event)
             return
 
         hit = self._hit_test(event.position().toPoint())
         if hit is None:
             QToolTip.hideText()
+            self.hover_moved.emit(None)
             super().mouseMoveEvent(event)
             return
 
         if hit[0] == "label":
             _, label = hit
             QToolTip.showText(event.globalPosition().toPoint(), label, self)
+            self.hover_moved.emit(None)
         else:
             _, label, bucket_idx, count = hit
-            start_minute = bucket_idx * MINUTES_PER_BUCKET
-            h, m = divmod(start_minute, 60)
-            end_h, end_m = divmod(start_minute + MINUTES_PER_BUCKET, 60)
-            time_range = f"{h:02d}:{m:02d}–{end_h:02d}:{end_m:02d}"
-            L = self._layout()
-            flagged = L["flagged_by_source"].get(label, [False] * BUCKETS_PER_DAY)[bucket_idx]
-            flag_suffix = "  ⚑ flagged" if flagged else ""
-            text = f"{label}\n{time_range}  ·  {count} event{'s' if count != 1 else ''}{flag_suffix}"
-            QToolTip.showText(event.globalPosition().toPoint(), text, self)
+            QToolTip.showText(event.globalPosition().toPoint(), self._cell_tooltip_text(label, bucket_idx, count),
+                              self)
+            # Anchor for cross-chart sync: the same real entry a click here
+            # would navigate to (see _first_entry_in_bucket) — nothing to
+            # anchor on for an empty bucket.
+            anchor = self._first_entry_in_bucket(label, bucket_idx) if count > 0 else None
+            self.hover_moved.emit(anchor)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -423,15 +550,37 @@ class ActivityHeatmap(QWidget):
                         self.element_clicked.emit(label, target)
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        """Right-click menu: Copy details / Flag this event. Only meaningful
+        on a cell with actual events — a row-label right-click has no
+        specific moment to copy or flag, so no menu appears there.
+        """
+        hit = self._hit_test(event.pos())
+        if hit is None or hit[0] != "cell":
+            return
+        _, label, bucket_idx, count = hit
+        if count <= 0:
+            return
+
+        menu = QMenu(self)
+        text = self._cell_tooltip_text(label, bucket_idx, count)
+        menu.addAction("Copy details", lambda: QApplication.clipboard().setText(text))
+
+        target = self._resolve_flag_anchor(label, bucket_idx)
+        if target is not None:
+            menu.addAction("Flag this event", lambda: self.flag_requested.emit(label, target))
+
+        if not menu.isEmpty():
+            menu.exec(event.globalPos())
+
     def mouseDoubleClickEvent(self, event) -> None:
         # Reset zoom/pan back to the full 24h view.
-        self._view_start = 0.0
-        self._view_end = float(BUCKETS_PER_DAY)
-        self.update()
+        self.reset_view()
         super().mouseDoubleClickEvent(event)
 
     def leaveEvent(self, event) -> None:
         QToolTip.hideText()
+        self.hover_moved.emit(None)
         super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -538,23 +687,63 @@ class ActivityHeatmap(QWidget):
                 glow_rect = cell.adjusted(-pad, -pad, pad, pad)
                 painter.drawRoundedRect(glow_rect, CELL_RADIUS + pad, CELL_RADIUS + pad)
 
-        # Bottom axis — reflects the CURRENT (possibly zoomed) view rather
-        # than always showing fixed 0/6/12/18/24 marks.
+        # Bottom axis — density-aware ticks (more of them the wider this
+        # widget is, e.g. popped out) across the CURRENT (possibly zoomed)
+        # view, each with a faint vertical gridline through the grid above,
+        # rather than the previous fixed 3 marks regardless of chart size.
         axis_y = y_offset + TOP_PAD + len(sources) * ROW_HEIGHT
+        grid_top = y_offset + TOP_PAD
+        span_minutes = (view_end - view_start) * MINUTES_PER_BUCKET
+        tick_count = choose_tick_count(grid_width)
+        fractions = evenly_spaced_fractions(tick_count)
+
+        grid_pen = QColor(self._empty_cell_outline)
+        painter.setPen(grid_pen)
+        for frac in fractions[1:-1]:
+            gx = grid_left + frac * grid_width
+            painter.drawLine(QPointF(gx, grid_top), QPointF(gx, axis_y))
+
         painter.setPen(QColor(self._axis_text_color))
+        label_w = 56
+        for i, frac in enumerate(fractions):
+            bucket = view_start + frac * (view_end - view_start)
+            label = format_timeofday_tick(bucket * MINUTES_PER_BUCKET, span_minutes)
+            gx = grid_left + frac * grid_width
+            if i == 0:
+                rect = QRectF(gx, axis_y, label_w, 12)
+                align = Qt.AlignLeft | Qt.AlignVCenter
+            elif i == len(fractions) - 1:
+                rect = QRectF(gx - label_w, axis_y, label_w, 12)
+                align = Qt.AlignRight | Qt.AlignVCenter
+            else:
+                rect = QRectF(gx - label_w / 2, axis_y, label_w, 12)
+                align = Qt.AlignHCenter | Qt.AlignVCenter
+            painter.drawText(rect, align, label)
 
-        def bucket_to_hhmm(bucket: float) -> str:
-            total_minutes = int(bucket * MINUTES_PER_BUCKET)
-            h, m = divmod(total_minutes, 60)
-            return f"{h:02d}:{m:02d}"
+        # X-axis title — makes explicit that this is time-OF-DAY (aggregated
+        # across the whole imported range), not an absolute timeline like the
+        # spike chart, which is a real source of confusion otherwise.
+        title_color = QColor(self._axis_text_color)
+        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
+        painter.setPen(title_color)
+        painter.drawText(QRectF(grid_left, axis_y + 13, grid_width, 12), Qt.AlignHCenter | Qt.AlignVCenter,
+                         f"Time of day  ·  {utc_offset_label(self._display_tz)}")
 
-        mid_bucket = view_start + (view_end - view_start) / 2
-        painter.drawText(QRectF(grid_left, axis_y, 60, AXIS_HEIGHT),
-                         Qt.AlignLeft | Qt.AlignVCenter, bucket_to_hhmm(view_start))
-        painter.drawText(QRectF(grid_left + grid_width / 2 - 30, axis_y, 60, AXIS_HEIGHT),
-                         Qt.AlignHCenter | Qt.AlignVCenter, bucket_to_hhmm(mid_bucket))
-        painter.drawText(QRectF(grid_left + grid_width - 60, axis_y, 60, AXIS_HEIGHT),
-                         Qt.AlignRight | Qt.AlignVCenter, bucket_to_hhmm(view_end))
+        # Cross-chart hover sync — a dashed vertical guide at whatever
+        # moment is currently hovered on a SIBLING chart, converted to this
+        # chart's time-of-day axis. Drawn last so it sits on top of bars/grid.
+        if self._external_highlight_dt is not None:
+            local = self._external_highlight_dt.astimezone(self._tz())
+            minute_of_day = local.hour * 60 + local.minute + local.second / 60
+            bucket_pos = minute_of_day / MINUTES_PER_BUCKET
+            if view_start <= bucket_pos <= view_end:
+                hx = grid_left + (bucket_pos - view_start) * cell_width
+                pen = QPen(QColor(self._hover_sync_color))
+                pen.setWidth(2)
+                pen.setStyle(Qt.DashLine)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(hx, grid_top), QPointF(hx, axis_y))
+
         painter.end()
 
     @staticmethod
