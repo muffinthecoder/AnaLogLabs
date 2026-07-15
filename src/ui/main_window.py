@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from src.ui.theme import THEMES, THEME_LABELS, DEFAULT_THEME, build_stylesheet
 from src.ui.top_nav_bar import TopNavBar
-from src.ui.left_panel import LeftPanel, SORT_TIME_ASC, SORT_TIME_DESC, SORT_NAME
+from src.ui.left_panel import LeftPanel, SORT_TIME_ASC, SORT_TIME_DESC
 from src.ui.log_window_widget import LogWindowWidget
 from src.ui.event_detail_panel import EventDetailPanel
 from src.ui.visualization_row import VisualizationRow
@@ -229,6 +229,9 @@ class MainWindow(QMainWindow):
 
         self.left_panel.tab_manager.tab_selected.connect(self._on_tab_selected)
         self.visualization_row.element_clicked.connect(self._on_chart_navigate)
+        self.visualization_row.flag_requested.connect(self._on_chart_flag_toggle)
+        self.visualization_row.chart_popped_out.connect(self._on_chart_popped_out)
+        self.visualization_row.chart_docked_back.connect(self._on_chart_docked_back)
         self.left_panel.sort_changed.connect(self._on_sort_changed)
         self.left_panel.timeframe_selector.filter_applied.connect(self._on_filter_applied)
         self.left_panel.timeframe_selector.filter_cleared.connect(self._on_filter_cleared)
@@ -523,9 +526,7 @@ class MainWindow(QMainWindow):
 
     def _apply_sort(self) -> None:
         code = self.left_panel.current_sort()
-        if code == SORT_NAME:
-            self.left_panel.tab_manager.reorder(sorted(self.log_panels.keys()))
-        elif code in (SORT_TIME_ASC, SORT_TIME_DESC):
+        if code in (SORT_TIME_ASC, SORT_TIME_DESC):
             descending = code == SORT_TIME_DESC
             for panel in self.log_panels.values():
                 panel.table_model.sort_by_time(descending=descending)
@@ -609,6 +610,32 @@ class MainWindow(QMainWindow):
             self.toast.show_toast("Flag added", entry.source_label, kind="success", anchor=flag_anchor_widget)
         else:
             self.toast.show_toast("Flag removed", entry.source_label, kind="neutral", anchor=flag_anchor_widget)
+
+    def _on_chart_flag_toggle(self, source_label: str, utc_dt) -> None:
+        """Same anchor-toggle logic as _on_flag_toggle, driven from a chart's
+        right-click 'Flag this event' action instead of a log-row checkbox.
+
+        Charts only resolve to an aggregated bucket's representative
+        (source_label, utc_dt) — heatmap/spike buckets can span many log
+        rows, and even a single bubble represents one (entity, bucket) pair,
+        not necessarily one RawLogEntry — so this works directly off that
+        pair rather than requiring an actual entry object like
+        _on_flag_toggle does.
+        """
+        for i, anchor in enumerate(self._flag_anchors):
+            if abs((utc_dt - anchor).total_seconds()) <= 30:
+                del self._flag_anchors[i]
+                was_added = False
+                break
+        else:
+            self._flag_anchors.append(utc_dt)
+            was_added = True
+        self._apply_flag_anchors()
+        self._recompute_stats()
+        if was_added:
+            self.toast.show_toast("Flag added", source_label, kind="success", anchor=self.visualization_row)
+        else:
+            self.toast.show_toast("Flag removed", source_label, kind="neutral", anchor=self.visualization_row)
 
     def _apply_flag_anchors(self) -> None:
         for panel in self.log_panels.values():
@@ -732,6 +759,17 @@ class MainWindow(QMainWindow):
 
         if self._scroll_sync.registered_windows:
             self._scroll_sync.move_all_to_timestamp(utc_dt)
+
+    def _on_chart_popped_out(self, chart_title: str) -> None:
+        """Mirrors _on_detach_requested's toast for log windows — charts
+        previously popped out silently, the one action in that family that
+        didn't confirm itself.
+        """
+        self.toast.show_toast("Chart popped out", chart_title, kind="info")
+
+    def _on_chart_docked_back(self, chart_title: str) -> None:
+        """Mirrors _on_redock_requested's toast for log windows."""
+        self.toast.show_toast("Chart docked back", chart_title, kind="info")
 
     def _on_tab_selected(self, source_label: str) -> None:
         """The file list is display-only: a click does NOT leave a persistent

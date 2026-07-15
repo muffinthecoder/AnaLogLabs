@@ -25,16 +25,19 @@ from datetime import datetime, timedelta
 
 import pytz
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
-from PySide6.QtGui import QColor, QPainter, QFont, QLinearGradient
-from PySide6.QtWidgets import QWidget, QToolTip
+from PySide6.QtGui import QColor, QPainter, QFont, QLinearGradient, QPen
+from PySide6.QtWidgets import QWidget, QToolTip, QMenu, QApplication
 
 from src.models.data_classes import RawLogEntry
 from src.models.log_table_model import FLAG_WINDOW
+from src.normaliser.timezone_map import utc_offset_label
+from src.visualiser.axis_utils import choose_tick_count, evenly_spaced_fractions, format_time_tick
 
 BUCKETS = 40
-AXIS_HEIGHT = 16
-LEFT_GUTTER = 28   # room for a small Y scale
+AXIS_HEIGHT = 30   # tick-label row + a second row for the axis title
+LEFT_GUTTER = 42    # room for a Y scale (0 / mid / max) + rotated axis title
 TOP_PAD = 6
+AXIS_TITLE_COLOR_ALPHA = 170   # axis titles read slightly dimmer than tick labels
 
 BAR_RADIUS = 2.0
 GRIDLINE_COLOR = "#1c2740"
@@ -50,6 +53,14 @@ FLAG_GLOW_COLOR = "#ffffff"
 GLOW_LAYERS = 4
 GLOW_MAX_PAD = 4.0
 
+# Cross-chart hover sync (see VisualizationRow._on_chart_hover) — same
+# neutral off-white used in activity_heatmap.py, so the guide reads the
+# same way on every chart.
+# Cross-chart hover sync (see VisualizationRow._on_chart_hover) — color is
+# set from the active theme's accent (see set_theme()); this is only the
+# pre-set_theme() fallback.
+HOVER_SYNC_LINE_COLOR = "#e8ecf5"
+
 # Subtler, colored glow for tall (but not necessarily flagged) segments —
 # always weaker than the flag-glow tier so flagged still reads as more
 # important than merely busy.
@@ -64,6 +75,11 @@ class SpikeChart(QWidget):
 
     # (source_label, utc_datetime) — emitted on a plain (non-drag) segment click.
     element_clicked = Signal(str, object)
+    # utc_datetime | None — emitted on hover so the OTHER two charts can draw
+    # a synced highlight at the same moment (see VisualizationRow._on_chart_hover).
+    hover_moved = Signal(object)
+    # (source_label, utc_datetime) — "Flag this event" from the right-click menu.
+    flag_requested = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,14 +102,23 @@ class SpikeChart(QWidget):
         self._drag_view_end = None
 
         self._flag_anchors: list[datetime] = []
+        # Set by VisualizationRow when the SAME moment is hovered on a
+        # sibling chart — draws a synced vertical guide, independent of this
+        # widget's own internal hover state.
+        self._external_highlight_dt: datetime | None = None
 
         self._gridline_color = GRIDLINE_COLOR
         self._axis_text_color = AXIS_TEXT_COLOR
         self._empty_state_text = EMPTY_STATE_TEXT
         self._flag_glow_color = FLAG_GLOW_COLOR
+        self._hover_sync_color = HOVER_SYNC_LINE_COLOR
 
         self.setMinimumHeight(80)
-        self.setToolTip("Event volume over the investigation range, stacked by file — scroll to zoom, drag to pan")
+        # NOTE: deliberately no static setToolTip() here — this widget shows
+        # its own dynamic per-bar tooltip via mouseMoveEvent. Having both
+        # active caused Qt's built-in static tooltip to re-fire on almost
+        # every small mouse movement, fighting the per-bar one and making
+        # hovering feel overly sensitive/flickery.
 
     def set_theme(self, theme: dict) -> None:
         """See ActivityHeatmap.set_theme — same reasoning: QPainter colors
@@ -103,6 +128,9 @@ class SpikeChart(QWidget):
         self._axis_text_color = theme["chart_text_dim"]
         self._empty_state_text = theme["chart_text_dim"]
         self._flag_glow_color = theme["flag_color"]
+        # See ActivityHeatmap.set_theme for why accent (not a fixed color)
+        # is used for the cross-chart hover sync line.
+        self._hover_sync_color = theme["accent"]
         self.update()
 
     # -- Public API ------------------------------------------------------------
@@ -241,7 +269,111 @@ class SpikeChart(QWidget):
         L = self._layout()
         return L["view_start"] + timedelta(seconds=(bucket_idx + 0.5) * L["bucket_seconds"])
 
+    def _resolve_flag_anchor(self, bucket_idx: int, label: str) -> datetime | None:
+        """Finds one REAL entry's exact (ms-precise) timestamp within this
+        bucket for `label`, for use as a flag anchor.
+
+        _bucket_center_time() is fine for navigation (scrolling to "roughly
+        here" is forgiving), but flagging needs to land within FLAG_WINDOW
+        (±30s) of an actual row's timestamp — on a wide investigation range
+        a bucket can span minutes, so the geometric center can be nowhere
+        near any real entry in it, and flagging with it silently matches
+        nothing in the raw log window. Using a real entry's own timestamp
+        instead guarantees the anchor matches (0s away from itself).
+        """
+        L = self._layout()
+        bucket_start = L["view_start"] + timedelta(seconds=bucket_idx * L["bucket_seconds"])
+        bucket_end = bucket_start + timedelta(seconds=L["bucket_seconds"])
+        for entry in self._entries_by_source.get(label, []):
+            nts = entry.normalized_timestamp
+            if nts is None:
+                continue
+            t = nts.utc_datetime
+            if bucket_start <= t <= bucket_end:
+                return t + timedelta(milliseconds=nts.milliseconds)
+        return None
+
+    def set_external_highlight(self, anchor_dt: datetime | None) -> None:
+        """Called by VisualizationRow when a SIBLING chart is being hovered,
+        so this chart can draw a synced vertical guide at the matching
+        absolute moment (or clear it when anchor_dt is None / hover leaves).
+        Entirely separate from this widget's OWN hover state — never emits
+        hover_moved itself, so there's no feedback loop between charts.
+        """
+        if self._external_highlight_dt == anchor_dt:
+            return
+        self._external_highlight_dt = anchor_dt
+        self.update()
+
+    def _segment_tooltip_text(self, bucket_idx: int, label: str, count: int, flagged: bool) -> str:
+        """Builds the exact text shown in the hover tooltip — factored out
+        so the right-click 'Copy details' action can put IDENTICAL text on
+        the clipboard instead of duplicating this formatting.
+        """
+        L = self._layout()
+        b_start = L["view_start"] + timedelta(seconds=bucket_idx * L["bucket_seconds"])
+        b_end = b_start + timedelta(seconds=L["bucket_seconds"])
+        tz = self._tz()
+        time_range = f"{b_start.astimezone(tz).strftime('%H:%M:%S')}–{b_end.astimezone(tz).strftime('%H:%M:%S')}"
+
+        bucket_total = L["totals"][bucket_idx]
+        share_pct = (count / bucket_total * 100) if bucket_total else 0
+        is_peak = bucket_total > 0 and bucket_total == max(L["totals"])
+        peak_suffix = "  ★ peak" if is_peak else ""
+        flag_suffix = "  ⚑" if flagged else ""
+
+        return (
+            f"{label}\n"
+            f"{time_range}  ·  {count} event{'s' if count != 1 else ''} "
+            f"({share_pct:.0f}%){peak_suffix}{flag_suffix}"
+        )
+
     # -- Mouse interaction: zoom / pan / hover / click ---------------------------
+
+    def zoom_in(self) -> None:
+        """Button-driven zoom (toolbar), centered on the current view rather
+        than a cursor position — see wheelEvent for the cursor-anchored
+        version used for scroll-to-zoom.
+        """
+        self._zoom_by(ZOOM_FACTOR)
+
+    def zoom_out(self) -> None:
+        self._zoom_by(1.0 / ZOOM_FACTOR)
+
+    def _zoom_by(self, factor: float) -> None:
+        if self._range_start is None or self._range_end is None or self._range_end <= self._range_start:
+            return
+        view_start, view_end = self._effective_view()
+        span = (view_end - view_start).total_seconds()
+        center = view_start + timedelta(seconds=span / 2)
+
+        new_span = max(span * factor, MIN_VIEW_SECONDS)
+        full_span = (self._range_end - self._range_start).total_seconds()
+        new_span = min(new_span, full_span)
+
+        new_start = center - timedelta(seconds=new_span / 2)
+        new_end = center + timedelta(seconds=new_span / 2)
+        if new_start < self._range_start:
+            shift = self._range_start - new_start
+            new_start += shift
+            new_end += shift
+        if new_end > self._range_end:
+            shift = new_end - self._range_end
+            new_start -= shift
+            new_end -= shift
+
+        self._view_start = new_start
+        self._view_end = new_end
+        self.update()
+
+    def reset_view(self) -> None:
+        """Resets zoom/pan back to the full investigation range — same
+        effect as double-clicking the chart, exposed as a callable method so
+        the floating-window toolbar's Home button can trigger it directly.
+        """
+        self._view_start = None
+        self._view_end = None
+        self.update()
 
     def wheelEvent(self, event) -> None:
         if self._range_start is None or self._range_end is None or self._range_end <= self._range_start:
@@ -301,20 +433,17 @@ class SpikeChart(QWidget):
                     self._view_end = new_end
                     self.update()
             QToolTip.hideText()
+            self.hover_moved.emit(None)
         else:
             hit = self._hit_test(event.position().toPoint())
             if hit is None:
                 QToolTip.hideText()
+                self.hover_moved.emit(None)
             else:
                 bucket_idx, label, color, count, flagged = hit
-                L = self._layout()
-                b_start = L["view_start"] + timedelta(seconds=bucket_idx * L["bucket_seconds"])
-                b_end = b_start + timedelta(seconds=L["bucket_seconds"])
-                tz = self._tz()
-                time_range = f"{b_start.astimezone(tz).strftime('%H:%M:%S')}–{b_end.astimezone(tz).strftime('%H:%M:%S')}"
-                flag_suffix = "  ⚑ flagged" if flagged else ""
-                text = f"{label}\n{time_range}  ·  {count} event{'s' if count != 1 else ''}{flag_suffix}"
-                QToolTip.showText(event.globalPosition().toPoint(), text, self)
+                QToolTip.showText(event.globalPosition().toPoint(),
+                                  self._segment_tooltip_text(bucket_idx, label, count, flagged), self)
+                self.hover_moved.emit(self._bucket_center_time(bucket_idx))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -332,15 +461,31 @@ class SpikeChart(QWidget):
                 self.element_clicked.emit(label, self._bucket_center_time(bucket_idx))
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event) -> None:
+        """Right-click menu: Copy details / Flag this event, mirroring
+        ActivityHeatmap's context menu.
+        """
+        hit = self._hit_test(event.pos())
+        if hit is None:
+            return
+        bucket_idx, label, color, count, flagged = hit
+
+        menu = QMenu(self)
+        text = self._segment_tooltip_text(bucket_idx, label, count, flagged)
+        menu.addAction("Copy details", lambda: QApplication.clipboard().setText(text))
+        anchor = self._resolve_flag_anchor(bucket_idx, label)
+        if anchor is not None:
+            menu.addAction("Flag this event", lambda: self.flag_requested.emit(label, anchor))
+        menu.exec(event.globalPos())
+
     def mouseDoubleClickEvent(self, event) -> None:
         # Reset zoom/pan back to the full investigation range.
-        self._view_start = None
-        self._view_end = None
-        self.update()
+        self.reset_view()
         super().mouseDoubleClickEvent(event)
 
     def leaveEvent(self, event) -> None:
         QToolTip.hideText()
+        self.hover_moved.emit(None)
         super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -367,10 +512,24 @@ class SpikeChart(QWidget):
             gy = plot_bottom - frac * plot_height
             painter.drawLine(QPointF(plot_left, gy), QPointF(plot_left + plot_width, gy))
 
-        # Y scale ticks (0 and max).
+        # Y scale ticks: 0 / mid / max, aligned to the 0% and 100% gridlines
+        # plus the (already-drawn, unlabeled) 50% one, so every labeled value
+        # has a line to anchor to instead of floating unattached to the grid.
         painter.setPen(QColor(self._axis_text_color))
-        painter.drawText(QRectF(0, plot_top - 6, LEFT_GUTTER - 4, 12), Qt.AlignRight | Qt.AlignVCenter, str(max_total))
-        painter.drawText(QRectF(0, plot_bottom - 12, LEFT_GUTTER - 4, 12), Qt.AlignRight | Qt.AlignVCenter, "0")
+        painter.drawText(QRectF(0, plot_top - 6, LEFT_GUTTER - 6, 12), Qt.AlignRight | Qt.AlignVCenter, str(max_total))
+        painter.drawText(QRectF(0, plot_bottom - 0.5 * plot_height - 6, LEFT_GUTTER - 6, 12),
+                         Qt.AlignRight | Qt.AlignVCenter, str(max_total // 2))
+        painter.drawText(QRectF(0, plot_bottom - 12, LEFT_GUTTER - 6, 12), Qt.AlignRight | Qt.AlignVCenter, "0")
+
+        # Rotated Y-axis title ("EVENTS"), read bottom-to-top along the gutter.
+        painter.save()
+        title_color = QColor(self._axis_text_color)
+        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
+        painter.setPen(title_color)
+        painter.translate(11, plot_top + plot_height / 2)
+        painter.rotate(-90)
+        painter.drawText(QRectF(-plot_height / 2, -12, plot_height, 12), Qt.AlignCenter, "EVENTS")
+        painter.restore()
 
         # Draw stacked bars — thin, gapped, gradient-fade top-to-bottom.
         glow_queue = []            # flagged segments -> bright white glow, painted last (on top)
@@ -425,17 +584,59 @@ class SpikeChart(QWidget):
                 glow_rect = rect.adjusted(-pad, -pad, pad, pad)
                 painter.drawRoundedRect(glow_rect, BAR_RADIUS + pad, BAR_RADIUS + pad)
 
-        # X axis: start / mid / end of the CURRENT (possibly zoomed) view, in display tz.
+        # X axis: density-aware ticks across the CURRENT (possibly zoomed)
+        # view — more of them the wider this widget is (e.g. popped out),
+        # each with its own faint vertical gridline so a tick label always
+        # has something to point at rather than floating free below the bars.
         tz = self._tz()
         view_start, view_end = L["view_start"], L["view_end"]
-        mid = view_start + (view_end - view_start) / 2
+        span_seconds = (view_end - view_start).total_seconds()
+        tick_count = choose_tick_count(plot_width)
+        fractions = evenly_spaced_fractions(tick_count)
+
+        grid_pen = QColor(self._gridline_color)
+        painter.setPen(grid_pen)
+        for frac in fractions[1:-1]:  # skip the plot's own left/right border
+            gx = plot_left + frac * plot_width
+            painter.drawLine(QPointF(gx, plot_top), QPointF(gx, plot_bottom))
+
         painter.setPen(QColor(self._axis_text_color))
-        painter.drawText(QRectF(plot_left, plot_bottom, 60, AXIS_HEIGHT),
-                         Qt.AlignLeft | Qt.AlignVCenter, view_start.astimezone(tz).strftime("%H:%M:%S"))
-        painter.drawText(QRectF(plot_left + plot_width / 2 - 30, plot_bottom, 60, AXIS_HEIGHT),
-                         Qt.AlignHCenter | Qt.AlignVCenter, mid.astimezone(tz).strftime("%H:%M:%S"))
-        painter.drawText(QRectF(plot_left + plot_width - 60, plot_bottom, 60, AXIS_HEIGHT),
-                         Qt.AlignRight | Qt.AlignVCenter, view_end.astimezone(tz).strftime("%H:%M:%S"))
+        label_w = 70
+        for i, frac in enumerate(fractions):
+            tick_time = view_start + timedelta(seconds=frac * span_seconds)
+            label = format_time_tick(tick_time.astimezone(tz), span_seconds)
+            gx = plot_left + frac * plot_width
+            if i == 0:
+                rect = QRectF(gx, plot_bottom, label_w, 12)
+                align = Qt.AlignLeft | Qt.AlignVCenter
+            elif i == len(fractions) - 1:
+                rect = QRectF(gx - label_w, plot_bottom, label_w, 12)
+                align = Qt.AlignRight | Qt.AlignVCenter
+            else:
+                rect = QRectF(gx - label_w / 2, plot_bottom, label_w, 12)
+                align = Qt.AlignHCenter | Qt.AlignVCenter
+            painter.drawText(rect, align, label)
+
+        # X-axis title — names the timezone so "detailed" ticks are also
+        # unambiguous, not just more numerous.
+        title_color = QColor(self._axis_text_color)
+        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
+        painter.setPen(title_color)
+        painter.drawText(QRectF(plot_left, plot_bottom + 13, plot_width, 12), Qt.AlignHCenter | Qt.AlignVCenter,
+                         f"Time  ·  {utc_offset_label(self._display_tz)}")
+
+        # Cross-chart hover sync — a dashed vertical guide at whatever
+        # moment is currently hovered on a SIBLING chart. Drawn last so it
+        # sits on top of bars/grid.
+        if self._external_highlight_dt is not None and view_start <= self._external_highlight_dt <= view_end:
+            frac = (self._external_highlight_dt - view_start).total_seconds() / max(span_seconds, 1e-6)
+            hx = plot_left + frac * plot_width
+            pen = QPen(QColor(self._hover_sync_color))
+            pen.setWidth(2)
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(hx, plot_top), QPointF(hx, plot_bottom))
+
         painter.end()
 
     @staticmethod

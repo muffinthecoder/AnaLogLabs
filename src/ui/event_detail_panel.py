@@ -114,11 +114,10 @@ class EventDetailPanel(QWidget):
         self.field_ip = FieldDisplay("IP address", "--")
         self.field_status = FieldDisplay("Status", "--")
         self.field_source = FieldDisplay("Source type", "--")
-        self.field_correlation = FieldDisplay("Correlation", "--", value_color=self._theme_text_dim)
 
         for field in (
                 self.field_timestamp, self.field_username, self.field_ip,
-                self.field_status, self.field_source, self.field_correlation,
+                self.field_status, self.field_source,
         ):
             self.fields_container.addWidget(field)
 
@@ -179,7 +178,12 @@ class EventDetailPanel(QWidget):
 
     def show_event(self, entry: RawLogEntry, correlation_count: int = 0) -> None:
         """Populate the panel from a clicked RawLogEntry. Field keys below are
-        the canonical names produced by LogParser._map_fields()."""
+        the canonical names produced by LogParser._map_fields().
+
+        correlation_count is accepted (not just dropped) so MainWindow's
+        existing call signature doesn't need to change, but it's no longer
+        rendered anywhere — see the Correlation-field removal note above.
+        """
         self._last_entry = entry
         self._last_correlation = correlation_count
 
@@ -208,10 +212,6 @@ class EventDetailPanel(QWidget):
         self.field_ip.set_value(ip_address)
         self.field_status.set_value(status, value_color=status_color)
         self.field_source.set_value(entry.source_label)
-        self.field_correlation.set_value(
-            f"{correlation_count} related events" if correlation_count else "No correlations",
-            value_color=self._theme_accent if correlation_count else self._theme_text_dim,
-        )
 
         raw_payload = dict(entry.fields)
         raw_payload["source"] = entry.source_label
@@ -251,7 +251,6 @@ class EventDetailPanel(QWidget):
             self.show_event(self._last_entry, self._last_correlation)
         else:
             self.field_timestamp.set_value("--", value_color=self._theme_accent)
-            self.field_correlation.set_value("--", value_color=self._theme_text_dim)
 
     def clear(self) -> None:
         self.header_label.setText("EVENT DETAIL — no event selected")
