@@ -23,7 +23,7 @@ from src.visualiser.spike_chart import SpikeChart
 from src.visualiser.bubble_chart import BubbleChart
 
 from PySide6.QtWidgets import QFileDialog
-from PySide6.QtGui import QPixmap, QPainter
+from PySide6.QtGui import QPixmap, QPainter, QIcon
 
 
 def _export_widget(widget: QWidget, title: str):
@@ -47,16 +47,16 @@ def _export_widget(widget: QWidget, title: str):
 # own behavior.
 _CHART_DESCRIPTIONS = {
     "heatmap": (
-        "Shows when each file is busiest across a 24-hour day, aggregated over the "
-        "entire imported range. Brighter cells mean more events at that time of day for that file."
+        "• Shows when each file is busiest across a 24-hour day, aggregated over the entire imported range.\n"
+        "• Brighter cells mean more events at that time of day for that file."
     ),
     "spike": (
-        "Stacked event volume across the current investigation range, broken down by source file. "
-        "Tall spikes highlight bursts of activity worth a closer look."
+        "• Stacked event volume across the current investigation range, broken down by source file.\n"
+        "• Tall spikes highlight bursts of activity worth a closer look."
     ),
     "bubble": (
-        "Plots the busiest users/IPs over time — bubble size is event volume, colour is source file. "
-        "One huge bubble suggests brute force; many small ones at once suggests spraying or lateral movement."
+        "• Bubble size is event volume, colour is source file — plots the busiest users/IPs over time.\n"
+        "• One huge bubble suggests brute force; many small ones at once suggests spraying or lateral movement."
     ),
 }
 
@@ -90,14 +90,16 @@ class FloatingChartWindow(QWidget):
     closed = Signal(object)  # self — lets VisualizationRow prune its tracking list
 
     def __init__(self, chart_widget: QWidget, stack: QStackedWidget, title: str = "Detached Chart",
-                 theme: dict | None = None, parent=None):
+                 theme: dict | None = None, legend: QWidget | None = None, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.chart_widget = chart_widget
         self.stack = stack
         self._title = title
+        self._legend = legend
 
         self.setWindowTitle(title)
+        self.setWindowIcon(QIcon())  # suppress Qt's default logo (see main())
         self.resize(1000, 600)  # Open nice and large for the ISOO
 
         layout = QVBoxLayout(self)
@@ -120,12 +122,15 @@ class FloatingChartWindow(QWidget):
         self._subheading_lbl.setWordWrap(True)
         layout.addWidget(self._subheading_lbl, 0)
 
-        # -- Toolbar: the actual chart-relevant interactions, not a generic --
-        # Every chart class (ActivityHeatmap, SpikeChart, BubbleChart) now
-        # exposes the same zoom_in()/zoom_out()/reset_view() API regardless
-        # of whether it's QPainter- or PyQtGraph-based, so this toolbar
-        # doesn't need to know which chart it's attached to.
+        # -- Toolbar row: the legend (left) + chart-relevant interactions --
+        # (right). Sharing one row instead of giving the legend its own
+        # keeps it from eating into the chart's vertical space — the chart
+        # should still dominate the window. The legend only appears here,
+        # on a popped-out chart; the embedded dashboard view has no legend
+        # at all now (see VisualizationRow.__init__).
         toolbar_layout = QHBoxLayout()
+        if self._legend is not None:
+            toolbar_layout.addWidget(self._legend, 0)
         toolbar_layout.addStretch()
 
         self._zoom_out_btn = QPushButton("−")
@@ -196,15 +201,25 @@ class FloatingChartWindow(QWidget):
         text_secondary = theme["text_secondary"]
         bg_app = theme["bg_app"]
 
-        self._title_lbl.setStyleSheet(f"font-weight: bold; color: {accent};")
-        self._subheading_lbl.setStyleSheet(f"font-size: 11px; color: {text_secondary};")
+        self._title_lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {accent};")
+        self._subheading_lbl.setStyleSheet(f"font-size: 12px; color: {text_secondary};")
 
         toolbar_btn_style = (
-            f"background-color: {bg_input}; color: {text_primary}; border: 1px solid {accent}; border-radius: 6px;"
+            f"background-color: {bg_input}; color: {text_primary}; border: 1px solid {accent}; "
+            f"border-radius: 6px; font-size: 12px;"
         )
         for btn in (self._zoom_out_btn, self._zoom_in_btn, self._reset_btn,
                     self._fullscreen_btn, self._export_btn):
             btn.setStyleSheet(toolbar_btn_style)
+
+        if self._legend is not None:
+            # Reads as a distinct "box" rather than plain inline text,
+            # matching the toolbar buttons' chrome so it feels like it
+            # belongs in that row rather than looking like an afterthought.
+            self._legend.setStyleSheet(
+                f"_LegendStrip {{ background-color: {bg_input}; border: 1px solid {accent}; border-radius: 6px; }}"
+            )
+            self._legend.set_theme(text_primary, text_secondary)
 
         heat_bg, heat_border = theme["chart_heat_bg"], theme["chart_heat_border"]
         spike_bg, spike_border = theme["chart_spike_bg"], theme["chart_spike_border"]
@@ -217,9 +232,16 @@ class FloatingChartWindow(QWidget):
         """)
 
     def closeEvent(self, event) -> None:
-        """When the investigator closes the floating window, snap the chart back."""
+        """When the investigator closes the floating window, snap the chart
+        back — and detach the legend (if this window is currently hosting
+        it) so it isn't destroyed along with this window's other children
+        once nothing references it anymore, and is free to be reparented
+        into the next chart that gets popped out.
+        """
         self.stack.insertWidget(0, self.chart_widget)
         self.stack.setCurrentIndex(0)
+        if self._legend is not None:
+            self._legend.setParent(None)
         self.closed.emit(self)
         super().closeEvent(event)
 
@@ -263,12 +285,12 @@ class _LegendChip(QWidget):
     def _apply_style(self) -> None:
         if self._active:
             self.swatch.setStyleSheet(f"background-color: {self._color}; border-radius: 3px;")
-            self.name.setStyleSheet(f"font-size: 11px; color: {self._active_text};")
+            self.name.setStyleSheet(f"font-size: 12px; color: {self._active_text};")
         else:
             self.swatch.setStyleSheet(
                 f"background-color: transparent; border: 1px solid {self._color}; border-radius: 3px;"
             )
-            self.name.setStyleSheet(f"font-size: 11px; color: {self._inactive_text}; text-decoration: line-through;")
+            self.name.setStyleSheet(f"font-size: 12px; color: {self._inactive_text}; text-decoration: line-through;")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -279,41 +301,69 @@ class _LegendChip(QWidget):
 
 
 class _LegendStrip(QWidget):
-    """Horizontal file → colour key shown under both charts (Section 5.3)."""
+    """File → colour key. Lives inside a POPPED-OUT chart's toolbar row (see
+    FloatingChartWindow) — not shown in the embedded dashboard at all, to
+    keep that space for the charts themselves.
+
+    Chips are split across 2 rows rather than one long horizontal line —
+    with enough sources loaded, a single-row layout ran wider than the
+    window itself with no way to see the rest.
+    """
 
     source_toggled = Signal(str)  # source_label — click-to-toggle visibility
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(24)
-        self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(10, 2, 10, 2)
-        self._layout.setSpacing(14)
+        self.setAttribute(Qt.WA_StyledBackground, True)  # so its own QSS background/border actually paints
+        self.setFixedHeight(54)  # 2 chip rows + margins
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 2, 10, 2)
+        outer.setSpacing(2)
+
+        self._row1 = QHBoxLayout()
+        self._row1.setSpacing(14)
+        self._row2 = QHBoxLayout()
+        self._row2.setSpacing(14)
+        outer.addLayout(self._row1)
+        outer.addLayout(self._row2)
+
         self._title = QLabel("KEY:")
         self._active_text = "#c8d3ea"
         self._inactive_text = "#4a5a7a"
-        self._title.setStyleSheet(f"font-size: 12px; color: {self._active_text}; font-weight: bold;")
-        self._layout.addWidget(self._title)
-        self._layout.addStretch()
+        self._title.setStyleSheet(f"font-size: 13px; color: {self._active_text}; font-weight: bold;")
+        self._row1.addWidget(self._title)
+        self._row1.addStretch()
+        self._row2.addStretch()
         self._chips: dict[str, _LegendChip] = {}
 
     def set_items(self, colors: dict[str, str]) -> None:
-        while self._layout.count() > 2:
-            item = self._layout.takeAt(1)
+        # Row 1 keeps its KEY: label (index 0) and trailing stretch (last);
+        # row 2 keeps just its trailing stretch (last) — clear everything
+        # else between rebuilds.
+        while self._row1.count() > 2:
+            item = self._row1.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        while self._row2.count() > 1:
+            item = self._row2.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._chips.clear()
 
-        for source_label, color in colors.items():
+        labels = list(colors.items())
+        split_at = (len(labels) + 1) // 2  # row 1 gets the extra chip on an odd count
+        for i, (source_label, color) in enumerate(labels):
             chip = _LegendChip(source_label, color, self._active_text, self._inactive_text)
             chip.toggled.connect(self.source_toggled)
             self._chips[source_label] = chip
-            self._layout.insertWidget(self._layout.count() - 1, chip)
+            target_row = self._row1 if i < split_at else self._row2
+            target_row.insertWidget(target_row.count() - 1, chip)
 
     def set_theme(self, active_text: str, inactive_text: str) -> None:
         self._active_text = active_text
         self._inactive_text = inactive_text
-        self._title.setStyleSheet(f"font-size: 12px; color: {active_text}; font-weight: bold;")
+        self._title.setStyleSheet(f"font-size: 13px; color: {active_text}; font-weight: bold;")
         for chip in self._chips.values():
             chip.set_theme_colors(active_text, inactive_text)
 
@@ -399,9 +449,14 @@ class VisualizationRow(QWidget):
 
         layout.addWidget(self.charts_splitter, stretch=1)
 
+        # The legend used to sit in a row here, under all three charts,
+        # permanently consuming space that could go to the charts. It's now
+        # only shown inside a POPPED-OUT chart's toolbar row (see
+        # FloatingChartWindow) — this single _LegendStrip instance is kept
+        # alive and reparented into whichever floating window is currently
+        # open, rather than living in this layout at all.
         self.legend = _LegendStrip()
         self.legend.source_toggled.connect(self._on_source_toggled)
-        layout.addWidget(self.legend)
 
     def _titled(self, title: str, widget: QWidget) -> QWidget:
         container = QWidget()
@@ -412,7 +467,7 @@ class VisualizationRow(QWidget):
         # Now just holds the title
         label = QLabel(title)
         label.setStyleSheet(
-            f"font-size: 11px; font-weight: bold; color: {self._theme_accent}; text-transform: uppercase;")
+            f"font-size: 12px; font-weight: bold; color: {self._theme_accent}; text-transform: uppercase;")
         v.addWidget(label)
         self._section_labels.append(label)
 
@@ -420,7 +475,7 @@ class VisualizationRow(QWidget):
         stack.addWidget(widget)
         placeholder = QLabel("Chart detached.\nClose floating window to restore.")
         placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setStyleSheet(f"color: {self._theme_dim}; font-style: italic; font-size: 12px;")
+        placeholder.setStyleSheet(f"color: {self._theme_dim}; font-style: italic; font-size: 13px;")
         stack.addWidget(placeholder)
         self._section_placeholders.append(placeholder)
         v.addWidget(stack, stretch=1)
@@ -435,9 +490,15 @@ class VisualizationRow(QWidget):
             if obj in (self.heatmap, self.spike, self.bubble):
                 # Ensure we only pop it out if it is currently inside the dashboard stack
                 if obj.parentWidget() == getattr(obj, '_parent_stack', None):
+                    # The legend lives in whichever floating window was most
+                    # recently opened — detach it from wherever it currently
+                    # is (another open floating window, or nowhere) before
+                    # handing it to this new one.
+                    self.legend.setParent(None)
+
                     # Create and show the floating window
                     fw = FloatingChartWindow(
-                        obj, obj._parent_stack, obj._chart_title, theme=self._theme,
+                        obj, obj._parent_stack, obj._chart_title, theme=self._theme, legend=self.legend,
                     )
                     fw.closed.connect(self._on_floating_chart_closed)
                     self._floating_windows.append(fw)
@@ -505,9 +566,9 @@ class VisualizationRow(QWidget):
 
         for label in self._section_labels:
             label.setStyleSheet(
-                f"font-size: 11px; font-weight: bold; color: {self._theme_accent}; text-transform: uppercase;")
+                f"font-size: 12px; font-weight: bold; color: {self._theme_accent}; text-transform: uppercase;")
         for placeholder in self._section_placeholders:
-            placeholder.setStyleSheet(f"color: {self._theme_dim}; font-style: italic; font-size: 12px;")
+            placeholder.setStyleSheet(f"color: {self._theme_dim}; font-style: italic; font-size: 13px;")
 
         self.legend.set_theme(self._theme_text, self._theme_dim)
 

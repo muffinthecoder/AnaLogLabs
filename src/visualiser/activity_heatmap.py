@@ -49,9 +49,8 @@ MAX_ALPHA = 245
 
 ROW_HEIGHT = 22
 LABEL_GUTTER = 132   # left area: colour dot + file name (widened so more sources stay readable)
-AXIS_HEIGHT = 28     # tick-label row + a second row for the axis title
+AXIS_HEIGHT = 32    # tick-label row + a second, larger/bold row for the axis title
 TOP_PAD = 4
-AXIS_TITLE_COLOR_ALPHA = 170
 
 CELL_RADIUS = 3.0
 EMPTY_CELL_OUTLINE = "#1c2740"   # faint outline so zero-activity buckets still read as grid
@@ -722,11 +721,15 @@ class ActivityHeatmap(QWidget):
 
         # X-axis title — makes explicit that this is time-OF-DAY (aggregated
         # across the whole imported range), not an absolute timeline like the
-        # spike chart, which is a real source of confusion otherwise.
-        title_color = QColor(self._axis_text_color)
-        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
-        painter.setPen(title_color)
-        painter.drawText(QRectF(grid_left, axis_y + 13, grid_width, 12), Qt.AlignHCenter | Qt.AlignVCenter,
+        # spike chart, which is a real source of confusion otherwise. Bold +
+        # accent-colored (not the dimmed tick-label color) so it reads as a
+        # clear axis label rather than blending into the tick row above it.
+        title_font = QFont()
+        title_font.setPixelSize(13)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(self._hover_sync_color))
+        painter.drawText(QRectF(grid_left, axis_y + 14, grid_width, 16), Qt.AlignHCenter | Qt.AlignVCenter,
                          f"Time of day  ·  {utc_offset_label(self._display_tz)}")
 
         # Cross-chart hover sync — a dashed vertical guide at whatever
@@ -749,7 +752,7 @@ class ActivityHeatmap(QWidget):
     @staticmethod
     def _small_font() -> QFont:
         f = QFont()
-        f.setPixelSize(10)
+        f.setPixelSize(11)
         return f
 
     @staticmethod

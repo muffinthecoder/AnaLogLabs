@@ -24,7 +24,7 @@ from collections import defaultdict
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QRadialGradient, QGradient, QBrush, QCursor
+from PySide6.QtGui import QColor, QRadialGradient, QGradient, QBrush, QCursor, QFont
 from PySide6.QtWidgets import QToolTip, QMenu, QApplication
 
 from src.models.data_classes import RawLogEntry
@@ -107,6 +107,7 @@ class BubbleChart(pg.PlotWidget):
         self._axis_text_color = AXIS_TEXT_COLOR
         self._empty_state_text = EMPTY_STATE_TEXT
         self._flag_glow_color = FLAG_GLOW_COLOR
+        self._hover_sync_color = HOVER_SYNC_LINE_COLOR
 
         # Setup Axes
         self.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_color))
@@ -115,6 +116,12 @@ class BubbleChart(pg.PlotWidget):
         axis_font = self._small_font()
         self.getAxis("bottom").setStyle(tickFont=axis_font)
         self.getAxis("left").setStyle(tickFont=axis_font)
+        # Without this, pyqtgraph auto-detects the X-axis's raw value
+        # magnitude (epoch timestamps, ~1.7 billion) and silently appends a
+        # scale suffix like "(x1e+09)" to the axis title — meaningless here
+        # since every tick already has its own real HH:MM:SS label.
+        self.getAxis("bottom").enableAutoSIPrefix(False)
+        self.getAxis("left").enableAutoSIPrefix(False)
 
         # Strip pyqtgraph's default chrome — the boxed border and full x+y
         # grid made this chart look like a different widget embedded in the
@@ -194,12 +201,31 @@ class BubbleChart(pg.PlotWidget):
         self._flag_glow_color = theme["flag_color"]
         self.getAxis("bottom").setTextPen(pg.mkPen(self._axis_text_color))
         self.getAxis("left").setTextPen(pg.mkPen(self._axis_text_color))
+        # Explicit tick font size, matching the other two charts' 11px tick
+        # labels (pyqtgraph's own default otherwise varies by platform).
+        tick_font = QFont()
+        tick_font.setPixelSize(11)
+        self.getAxis("bottom").setTickFont(tick_font)
+        self.getAxis("left").setTickFont(tick_font)
         self._empty_text.setColor(self._empty_state_text)
         # See ActivityHeatmap.set_theme for why accent (not a fixed color)
-        # is used for the cross-chart hover sync line — a fixed near-white
-        # was invisible against the "original"/"coral_reef" themes' light
-        # chart backgrounds.
+        # is used for the cross-chart hover sync line and axis titles — a
+        # fixed near-white was invisible against the "original"/"coral_reef"
+        # themes' light chart backgrounds.
+        self._hover_sync_color = theme["accent"]
         self._highlight_line.setPen(pg.mkPen(theme["accent"], width=2, style=Qt.DashLine))
+
+        # Axis TITLES are normally (re)colored inside _refresh_plot(), which
+        # only runs on a data/range change — re-applying them here too means
+        # a live theme switch updates their color immediately instead of
+        # lagging behind until the next refresh.
+        title_style = {"font-size": "13px", "font-weight": "bold"}
+        left_axis = self.getAxis("left")
+        left_axis.setLabel(left_axis.labelText or "Top entities (users / IPs)",
+                           color=self._hover_sync_color, **title_style)
+        bottom_axis = self.getAxis("bottom")
+        bottom_axis.setLabel(bottom_axis.labelText or "Time", color=self._hover_sync_color, **title_style)
+
         self.setBackground(None)
         self._refresh_plot()
 
@@ -386,7 +412,7 @@ class BubbleChart(pg.PlotWidget):
     def _small_font():
         from PySide6.QtGui import QFont
         f = QFont()
-        f.setPixelSize(10)
+        f.setPixelSize(11)
         return f
 
     # -- Internal Logic -------------------------------------------------------
@@ -614,7 +640,10 @@ class BubbleChart(pg.PlotWidget):
         # Y-Axis: Entities (elided — full name available via hover tooltip on the bubble)
         y_ticks = [[(i, self._elide(name, Y_LABEL_ELIDE_CHARS)) for name, i in y_map.items()]]
         self.getAxis("left").setTicks(y_ticks)
-        self.getAxis("left").setLabel("Top entities (users / IPs)", color=self._axis_text_color, **{"font-size": "9px"})
+        # Bold + accent-colored (not the dimmed tick color) so the axis name
+        # reads as prominently as the other two charts' axis titles.
+        self.getAxis("left").setLabel("Top entities (users / IPs)", color=self._hover_sync_color,
+                                      **{"font-size": "13px", "font-weight": "bold"})
 
         # X-Axis: density-aware ticks (more of them the wider this widget is,
         # e.g. popped out) instead of a fixed start/mid/end. Formatting is
@@ -631,7 +660,8 @@ class BubbleChart(pg.PlotWidget):
             for frac in fractions
         ]]
         self.getAxis("bottom").setTicks(x_ticks)
-        self.getAxis("bottom").setLabel("Time", color=self._axis_text_color, **{"font-size": "9px"})
+        self.getAxis("bottom").setLabel("Time", color=self._hover_sync_color,
+                                        **{"font-size": "13px", "font-weight": "bold"})
 
         # Set plot limits so bubbles don't clip on the edges
         self.setXRange(range_start_ts - (bucket_size / 2), range_end_ts + (bucket_size / 2), padding=0.05)

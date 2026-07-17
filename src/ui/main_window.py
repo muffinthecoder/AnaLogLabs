@@ -19,7 +19,7 @@ import sys
 from datetime import timedelta
 
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
     QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox, QDialog, QLabel,
@@ -874,6 +874,13 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    # Without an explicit icon, Qt falls back to its own default logo on
+    # every top-level window this app creates (MainWindow AND each
+    # popped-out FloatingChartWindow, since those are standalone windows
+    # too) — most visible on Windows' title bar. Setting a blank one here,
+    # at the QApplication level, clears it everywhere in one place rather
+    # than needing it set on each window individually.
+    app.setWindowIcon(QIcon())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
