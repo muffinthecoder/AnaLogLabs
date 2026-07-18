@@ -1,10 +1,11 @@
 """
+Owned by: Hiba
+
 floating_log_window.py — R1 free-floating log window.
 
 Hosts a LogWindowWidget as a genuine top-level desktop window so the
 investigator can drag it anywhere on screen, including onto a second monitor,
-fully independent of the AnaLog Labs main window (unlike the MDI sub-windows,
-which are clipped to the workspace area).
+fully independent of the AnaLog Labs main window.
 
 MainWindow owns the reparenting: it pulls a panel out of its QMdiSubWindow,
 wraps it here, and can later dock it back. This class only provides the
@@ -36,11 +37,6 @@ class FloatingLogWindow(QMainWindow):
         self.panel = panel
         self._redocking = False
 
-        # Themeable — being a genuine top-level window (not a child of
-        # MainWindow), this never inherited MainWindow's stylesheet even
-        # before hardcoded colors were the problem; it always needed its own
-        # explicit theming, which it never got. set_theme() below is called
-        # both here at construction and again by MainWindow on a live switch.
         self._theme_text = "#000000"
         self._theme_bg = "#102120"
         self._theme_text_on_bg = "#ffffff"
@@ -91,13 +87,13 @@ class FloatingLogWindow(QMainWindow):
 
     def prepare_redock(self) -> None:
         """Call before pulling the panel back out, so the subsequent close()
-        does NOT fire `closed` (which MainWindow treats as "remove the log").
+        does NOT fire `closed` .
         """
         self._redocking = True
 
     def closeEvent(self, event) -> None:
         # A plain top-level window does not propagate closeEvent to child
-        # widgets the way a QMdiSubWindow does, so we surface it explicitly.
+        # widgets the way a QMdiSubWindow does.
         if not self._redocking:
             self.closed.emit(self.source_label)
         super().closeEvent(event)

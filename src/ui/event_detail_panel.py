@@ -1,4 +1,6 @@
 """
+Owned by: Fatima
+
 EventDetailPanel — bottom panel populated when the investigator clicks any
 log table row (Section 6.3.4 Zone 4).
 
@@ -7,14 +9,12 @@ correlation count).
 Right side: complete raw record as JSON, monospace font, for forensic
 verification.
 
-Owned by: Fatima
+
 """
 
 import json
-
 import pytz
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame
-
 from src.models.data_classes import RawLogEntry
 from src.normaliser.timezone_map import utc_offset_label, DEFAULT_TIMEZONE
 from PySide6.QtCore import Qt, QEvent  # Added QEvent
@@ -27,7 +27,6 @@ STATUS_COLORS = {
     "Risky": "#e8b840",
     "Warning": "#e8b840",
 }
-
 
 class FieldDisplay(QWidget):
     """One key/value pair in the parsed fields section (e.g. "USERNAME" / "j.smith")."""
@@ -78,7 +77,7 @@ class EventDetailPanel(QWidget):
 
         # Themeable — this panel had its own hardcoded colors (a leftover
         # cyan accent and a hardcoded dark-navy JSON box) completely outside
-        # the theme system, which is exactly what showed up as "random blue"
+        # the theme system.
         # in a light theme. Defaults match what shipped before theming existed.
         self._theme_accent = "#00c4e8"
         self._theme_text_dim = "#4a5a7a"
@@ -102,7 +101,7 @@ class EventDetailPanel(QWidget):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        # ---- Left: parsed fields -------------------------------------------
+        # Left: parsed fields
         self.fields_container = QHBoxLayout()
         self.fields_container.setContentsMargins(12, 8, 12, 8)
         self.fields_container.setSpacing(16)
@@ -125,7 +124,7 @@ class EventDetailPanel(QWidget):
         fields_widget.setLayout(self.fields_container)
         body_layout.addWidget(fields_widget, stretch=1)
 
-        # ---- Right: raw JSON ------------------------------------------------
+        # Right: raw JSON
         self.raw_json_label = QLabel("Select an event to view raw data.")
         self.raw_json_label.setObjectName("RawJsonLabel")
         self.raw_json_label.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -144,7 +143,6 @@ class EventDetailPanel(QWidget):
         menu = QMenu(self)
         copy_all = QAction("Copy full event details", self)
 
-        # The text() method on a QLabel gets the raw JSON string you set in show_event()
         copy_all.triggered.connect(
             lambda: QApplication.clipboard().setText(self.raw_json_label.text())
         )
@@ -228,10 +226,7 @@ class EventDetailPanel(QWidget):
             self.show_event(self._last_entry, self._last_correlation)
 
     def set_theme(self, theme: dict) -> None:
-        """Applies a theme switch — this panel previously had its own
-        hardcoded colors entirely outside the theme system (see the comment
-        in __init__), which is what caused the "random blue in light mode"
-        bug. Re-renders the currently shown event so its colors pick up the
+        """Applies a theme switch — renders the currently shown event so its colors pick up the
         new theme too, not just the static chrome.
         """
         self._theme_accent = theme["accent"]

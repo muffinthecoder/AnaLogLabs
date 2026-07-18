@@ -1,4 +1,6 @@
 """
+Owned by: Fatima
+
 color_map.py — the single source of truth for per-file colours (Section 5.3).
 
 Every UI surface that needs a colour for a log source — heatmap row, spike-chart
@@ -7,8 +9,6 @@ reads from ONE SourceColorMap instance. There is deliberately no other colour
 logic anywhere else, so a file always looks the same everywhere and the
 investigator can correlate a pop-out window back to its heatmap row at a glance.
 
-Root cause this replaces: the import path hardcoded every file to the same blue
-("#4A90D9"), so all sources were visually identical in every chart.
 """
 
 # Eight visually distinct hues — enough for the 8-window cap. Chosen to read

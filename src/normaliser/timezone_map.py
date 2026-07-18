@@ -1,8 +1,10 @@
 """
+Owned by: Pooja
+
 timezone_map.py — maps log source labels to their IANA timezone string, and
 holds the list of timezones the investigator can VIEW logs in.
 
-Two distinct concepts live here (they used to be conflated):
+Two distinct concepts live here:
 
   1. SOURCE timezone  — the timezone a log file's raw timestamps are assumed
      to have been AUTHORED in. Per the client requirement (R2), imported logs
@@ -16,7 +18,7 @@ Two distinct concepts live here (they used to be conflated):
      SUPPORTED_TIMEZONES. It never changes the stored UTC value, only how it
      is rendered (see LogTableModel.format_timestamp).
 
-The supported set now spans the major Australian cities plus Dubai and
+The supported set spans the major Australian cities plus Dubai and
 Singapore (R3). Note that unlike the original three-zone prototype, several of
 these (Sydney/Melbourne/Adelaide) DO observe daylight saving — pytz.localize()
 handles the DST offset correctly, so no special-casing is needed here.

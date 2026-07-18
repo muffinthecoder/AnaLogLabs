@@ -1,19 +1,15 @@
 """
-xlsx_parser.py — parses XLSX log files using openpyxl.
-
-Per Section 4.7.1 step 2: 'IF format == "xlsx": Parse using openpyxl'.
-
 Owned by: Pooja
 Initial code provided by: Fatima
+
+xlsx_parser.py — parses XLSX log files using openpyxl.
+Per Section 4.7.1 step 2: 'IF format == "xlsx": Parse using openpyxl'.
 Consumed by: log_parser.py
 """
 
 from pathlib import Path
-
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-
-
 from src.parser.csv_parser import MalformedFileError
 
 def parse_xlsx(file_path: str) -> list[dict]:

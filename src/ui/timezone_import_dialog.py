@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 timezone_import_dialog.py — modal dialog shown before log files are parsed.
 Now asks only for the DISPLAY timezone (how the investigator wants to VIEW
 timestamps), not per-file source timezones. Rules are:
@@ -25,8 +27,7 @@ class TimezoneImportDialog(QDialog):
         self.setMinimumWidth(420)
         self.setModal(True)
         self.display_timezone: str = "Asia/Dubai"        # IANA, set on accept
-        # Keep the old attribute name so MainWindow's loop still compiles,
-        # but it now maps every file to the same display tz (unused by
+
         # TimestampNormalizer — the normalizer uses source tz, not display tz).
         self.timezone_assignments: dict[str, str] = {}
         self._file_paths = file_paths
@@ -63,12 +64,6 @@ class TimezoneImportDialog(QDialog):
         layout.addWidget(self._buttons)
 
     def _apply_theme(self) -> None:
-        """This is a genuine QDialog (top-level window), so — like the
-        floating chart/log windows — it never inherited MainWindow's
-        stylesheet at all, regardless of theme. It previously had hardcoded
-        white text on whatever Qt's default dialog background happens to be,
-        which is why it was unreadable in a light theme.
-        """
         t = self._theme
         self.setStyleSheet(f"""
             QDialog {{ background-color: {t['bg_sidebar']}; }}
@@ -90,9 +85,6 @@ class TimezoneImportDialog(QDialog):
         self.display_timezone = self._combo.currentData() or "Asia/Dubai"
         # Populate timezone_assignments so MainWindow's existing loop
         # (`for file_path, iana_tz in dialog.timezone_assignments.items()`)
-        # still runs without errors — but these values are now the DISPLAY
-        # timezone, not the source timezone. The source timezone is handled
-        # implicitly in TimestampNormalizer (Z → UTC, no-Z → Perth).
         self.timezone_assignments = {
             path: self.display_timezone for path in self._file_paths
         }

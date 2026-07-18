@@ -1,4 +1,7 @@
 """
+
+Owned by: Minal
+
 TimeFrameSelector — investigation window filter controls in the left sidebar
 (Section 6.3.4 Zone 2, subsection 2 "Inquiry Period").
 
@@ -8,16 +11,12 @@ Per the design doc's class diagram (Section 4.6):
     timezone: str
     use_24hr: bool
 
-Owned by: Fatima
-
 """
 
 from datetime import datetime, timedelta
-
 import pytz
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton
-
 from src.models.data_classes import FilterConfig
 
 # R4 — the investigation window is automatically widened by this much on each

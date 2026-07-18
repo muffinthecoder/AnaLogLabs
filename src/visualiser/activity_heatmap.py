@@ -1,4 +1,6 @@
 """
+Owned by: Hiba
+
 activity_heatmap.py — R6 / Section 5.1 activity heat map.
 
 Grid: X-axis = time of day (0:00 → 24:00), Y-axis = log source (one row per
@@ -87,7 +89,7 @@ ACTIVITY_GLOW_ALPHA = 50
 # time-of-day axis. Never changes how buckets are computed, only which of
 # them are currently drawn.
 ZOOM_FACTOR = 0.85
-MIN_VIEW_BUCKETS = 2.0     # don't let zoom collapse below ~1 hour of buckets
+MIN_VIEW_BUCKETS = 2.0
 DRAG_THRESHOLD_PX = 4      # movement beyond this counts as a pan, not a click
 
 
@@ -136,7 +138,7 @@ class ActivityHeatmap(QWidget):
         self._hover_sync_color = HOVER_SYNC_LINE_COLOR
 
         self.setMinimumHeight(ROW_HEIGHT + AXIS_HEIGHT + TOP_PAD)
-        # NOTE: deliberately no static setToolTip() here — see the matching
+
         # note in SpikeChart.__init__.
 
     def set_theme(self, theme: dict) -> None:
@@ -157,7 +159,7 @@ class ActivityHeatmap(QWidget):
         self._hover_sync_color = theme["accent"]
         self.update()
 
-    # -- Public API ------------------------------------------------------------
+    # Public API
 
     def set_entries(self, entries_by_source: dict[str, list[RawLogEntry]], colors: dict[str, str]) -> None:
         self._entries_by_source = entries_by_source
@@ -190,7 +192,7 @@ class ActivityHeatmap(QWidget):
         self._flag_anchors = list(anchors)
         self.update()
 
-    # -- Internal --------------------------------------------------------------
+    # Internal
 
     def _valid_sources(self) -> list[str]:
         return [

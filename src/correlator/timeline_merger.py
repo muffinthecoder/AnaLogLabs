@@ -1,9 +1,10 @@
 """
+Owned by: Hiba
+
 timeline_merger.py — implements Section 4.7.1 step 5: merging entries from
 all loaded log sources into a single chronologically sorted list (R2: Unified
 Timeline Synchronization).
 
-Owned by: Hiba
 Consumed by: src/parser/log_parser.py (final step of ImportAndParse), and by
 ScrollSyncManager indirectly (each window's per-source list must already be
 sorted ascending for binary search to work).

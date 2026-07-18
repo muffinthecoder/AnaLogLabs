@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 spike_chart.py — Section 5.2 master timeline / spike chart.
 
 X-axis = time (the active investigation range only), Y-axis = total event

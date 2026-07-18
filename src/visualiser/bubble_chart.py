@@ -1,4 +1,6 @@
 """
+Owned by: Hiba
+
 bubble_chart.py — Section 5.2 / Zone 5 Entity Bubble Chart.
 
 X-axis = Time (investigation range).
@@ -21,12 +23,10 @@ ranking, and bucket counts computed below are unchanged):
 
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QRadialGradient, QGradient, QBrush, QCursor, QFont
 from PySide6.QtWidgets import QToolTip, QMenu, QApplication
-
 from src.models.data_classes import RawLogEntry
 from src.models.log_table_model import FLAG_WINDOW
 from src.normaliser.timezone_map import utc_offset_label

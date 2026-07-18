@@ -1,4 +1,6 @@
 """
+Owned by: Fatima
+
 LogWindowWidget — displays raw log entries from a single log source in a
 scrollable, read-only table (Section 5.2, Presentation Layer).
 
@@ -90,7 +92,7 @@ class LogWindowWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ---- Panel header --------------------------------------------------
+        # Panel header
         header = QFrame()
         header.setObjectName("LogPanelHeader")
         # Section 5.3 — a coloured top accent tied to the file's palette colour,
@@ -123,13 +125,7 @@ class LogWindowWidget(QWidget):
 
         header_layout.addStretch()
 
-        # Guaranteed-working restore/resize toggle — see restore_size_
-        # requested's docstring above for why this exists alongside (not
-        # instead of) the native QMdiSubWindow title-bar button. Uses a
-        # text label with a visible border (rather than a muted icon-only
-        # glyph) because the icon version blended into the dark background
-        # and was effectively invisible — found during testing when it was
-        # only ever located by accident.
+        # working restore/resize toggle — see restore_size_
         self.restore_button = QPushButton("Restore window size")
         self.restore_button.setObjectName("RestoreSizeButton")
         self.restore_button.setFixedHeight(20)
@@ -146,8 +142,7 @@ class LogWindowWidget(QWidget):
         )
         header_layout.addWidget(self.restore_button)
 
-        # R1 — pop this panel out into a free-floating desktop window. Styled
-        # like the restore button so the two header actions read as a pair.
+        # R1 — pop this panel out into a free-floating desktop window.
         self.detach_button = QPushButton("Pop out")
         self.detach_button.setObjectName("DetachButton")
         self.detach_button.setFixedHeight(20)
@@ -171,7 +166,7 @@ class LogWindowWidget(QWidget):
 
         layout.addWidget(header)
 
-        # ---- Table -----------------------------------------------------------
+        # Table
         self.table_model = LogTableModel(columns=columns)
         self.table_view = QTableView()
         self.table_view.setModel(self.table_model)
@@ -257,7 +252,7 @@ class LogWindowWidget(QWidget):
 
         layout.addWidget(self.table_view)
 
-        # ---- Scroll position indicator bar -----------------------------------
+        # Scroll position indicator bar
         sync_bar = QFrame()
         sync_bar.setObjectName("ScrollSyncBar")
         sync_layout = QHBoxLayout(sync_bar)
@@ -277,7 +272,7 @@ class LogWindowWidget(QWidget):
 
         layout.addWidget(sync_bar)
 
-    # -- Public API --------------------------------------------------------------
+    # Public API
 
     def load_rows(self, entries: list[RawLogEntry]) -> None:
         """Load entries filtered to this source_label (Section 4.7.1 step 6)."""
@@ -484,7 +479,7 @@ class LogWindowWidget(QWidget):
         self.table_model.set_display_timezone(iana_tz)
         self._update_scroll_indicator(self.scroll_position)
 
-    # -- Internal handlers ---------------------------------------------------------
+    # Internal handlers
 
     def _on_row_clicked(self, index) -> None:
         entry = self.table_model.entry_at(index.row())

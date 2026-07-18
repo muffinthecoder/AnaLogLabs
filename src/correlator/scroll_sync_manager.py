@@ -1,4 +1,6 @@
 """
+Owned by: Hiba
+
 scroll_sync_manager.py — implements ALGORITHM: SyncScroll from Section 4.7.3
 of the design document.
 
@@ -6,12 +8,10 @@ Ensures all open log windows scroll together based on the same UTC timestamp
 position, not pixel offset, since different logs have different row counts
 and event densities.
 
-Owned by: Hiba
 Consumed by: src/ui/main_window.py (wires LogWindowWidget.scrolled signal here)
 """
 
 from datetime import datetime
-
 from src.models.data_classes import RawLogEntry
 
 

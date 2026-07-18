@@ -1,10 +1,12 @@
 """
+Owned by: Pooja
+
 locked_workspace.py — the "Sync Scroll" locked line.
 
 When Sync Scroll is enabled (a valid time range must already be set), every open
 log panel is snapped side-by-side into this one container ("locked in a straight
-line") and can no longer be dragged/moved. Unlike the earlier unified view, this
-is deliberately NOT a single shared scrollbar: each panel keeps its OWN vertical
+line") and can no longer be dragged/moved. This is deliberately NOT a single shared scrollbar:
+each panel keeps its OWN vertical
 scrollbar and can be scrolled independently — the panels are kept in step by
 ScrollSyncManager (MainWindow wires each panel's `scrolled` signal to it), which
 aligns every other panel to the nearest timestamp of whichever one the
@@ -41,7 +43,7 @@ class LockedWorkspace(QWidget):
 
     def set_panels(self, panels: dict) -> None:
         """Reparent every panel into this container, side by side. Each keeps
-        its OWN vertical scrollbar (ScrollSyncManager keeps them in step).
+        its own vertical scrollbar (ScrollSyncManager keeps them in step).
         """
         self._panels = dict(panels)
         if self._placeholder.parent() is not None:

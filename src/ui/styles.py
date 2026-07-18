@@ -1,15 +1,17 @@
 """
+Owned by: Minal
+
 styles.py — central QSS stylesheet for AnaLog Labs.
 
 Every hex value here is taken directly from Section 6.3.2 (Color Specification)
 of the System Design document. If a color needs to change, change it here only —
 no other file should hardcode a hex value.
 
-Owned by: Fatima
+
 
 """
 
-# Color spec — Section 6.3.2 -------------------------------------------------
+# Color spec — Section 6.3.2
 COLOR_BG_APP = "#05070d"            # Application background (SOC dark)
 COLOR_BG_PANEL = "#0b0f1c"          # Panel background
 COLOR_SOURCE_CYAN = "#2e8fff"       # Primary accent (Application source)
@@ -27,7 +29,7 @@ COLOR_TEXT_SECONDARY = "#7284a8"
 COLOR_BORDER = "#1c2740"
 COLOR_CORRELATED_INDICATOR = "#ffffff"
 
-# Typography — Section 6.3.3 --------------------------------------------------
+# Typography — Section 6.3.3
 FONT_FAMILY = "Segoe UI, -apple-system, sans-serif"
 
 

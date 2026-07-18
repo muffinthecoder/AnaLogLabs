@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 theme.py — the app's switchable color themes.
 
 Replaces the old fixed constants in styles.py with a THEMES dict + a
