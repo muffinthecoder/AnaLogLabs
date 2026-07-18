@@ -34,11 +34,9 @@ from src.normaliser.timezone_map import utc_offset_label
 from src.visualiser.axis_utils import choose_tick_count, evenly_spaced_fractions, format_time_tick
 
 BUCKETS = 40
-AXIS_HEIGHT = 30   # tick-label row + a second row for the axis title
-LEFT_GUTTER = 42    # room for a Y scale (0 / mid / max) + rotated axis title
+AXIS_HEIGHT = 34   # tick-label row + a second, larger/bold row for the axis title
+LEFT_GUTTER = 46    # room for a Y scale (0 / mid / max) + rotated axis title (now larger/bold)
 TOP_PAD = 6
-AXIS_TITLE_COLOR_ALPHA = 170   # axis titles read slightly dimmer than tick labels
-
 BAR_RADIUS = 2.0
 GRIDLINE_COLOR = "#1c2740"
 AXIS_TEXT_COLOR = "#7284a8"
@@ -522,13 +520,18 @@ class SpikeChart(QWidget):
         painter.drawText(QRectF(0, plot_bottom - 12, LEFT_GUTTER - 6, 12), Qt.AlignRight | Qt.AlignVCenter, "0")
 
         # Rotated Y-axis title ("EVENTS"), read bottom-to-top along the gutter.
+        # Bold + accent-colored (not dimmed) for prominence; save/restore
+        # scopes the bigger font to just this draw call, so it doesn't bleed
+        # into the tick labels below.
         painter.save()
-        title_color = QColor(self._axis_text_color)
-        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
-        painter.setPen(title_color)
-        painter.translate(11, plot_top + plot_height / 2)
+        title_font = QFont()
+        title_font.setPixelSize(13)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(self._hover_sync_color))
+        painter.translate(13, plot_top + plot_height / 2)
         painter.rotate(-90)
-        painter.drawText(QRectF(-plot_height / 2, -12, plot_height, 12), Qt.AlignCenter, "EVENTS")
+        painter.drawText(QRectF(-plot_height / 2, -14, plot_height, 16), Qt.AlignCenter, "EVENTS")
         painter.restore()
 
         # Draw stacked bars — thin, gapped, gradient-fade top-to-bottom.
@@ -618,11 +621,14 @@ class SpikeChart(QWidget):
             painter.drawText(rect, align, label)
 
         # X-axis title — names the timezone so "detailed" ticks are also
-        # unambiguous, not just more numerous.
-        title_color = QColor(self._axis_text_color)
-        title_color.setAlpha(AXIS_TITLE_COLOR_ALPHA)
-        painter.setPen(title_color)
-        painter.drawText(QRectF(plot_left, plot_bottom + 13, plot_width, 12), Qt.AlignHCenter | Qt.AlignVCenter,
+        # unambiguous, not just more numerous. Bold + accent-colored (not
+        # dimmed) to match the Y-axis title treatment.
+        title_font = QFont()
+        title_font.setPixelSize(13)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(self._hover_sync_color))
+        painter.drawText(QRectF(plot_left, plot_bottom + 14, plot_width, 16), Qt.AlignHCenter | Qt.AlignVCenter,
                          f"Time  ·  {utc_offset_label(self._display_tz)}")
 
         # Cross-chart hover sync — a dashed vertical guide at whatever
@@ -642,5 +648,5 @@ class SpikeChart(QWidget):
     @staticmethod
     def _small_font() -> QFont:
         f = QFont()
-        f.setPixelSize(10)
+        f.setPixelSize(11)
         return f
