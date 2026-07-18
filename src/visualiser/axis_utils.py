@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 axis_utils.py — shared axis-tick helpers for the three investigation charts
 (ActivityHeatmap, SpikeChart, BubbleChart).
 

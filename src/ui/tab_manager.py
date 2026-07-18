@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 TabManager — creates and manages one tab entry per loaded log file in the
 left sidebar (Section 5.2, Presentation Layer / Section 6.3.4 Zone 2).
 
@@ -7,12 +9,7 @@ Tab states (Section 6.3.4):
     Match    (green border) — contains events within the investigation window
     Inactive (greyed out)   — no events within the investigation window
 
-Owned by: Fatima
-
 """
-
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QClipboard, QAction
@@ -30,12 +27,6 @@ class LogTab(QFrame):
         self.color_hex = color_hex
         self.state = "inactive"  # "active" | "match" | "inactive"
 
-        # Themeable — these were hardcoded blue/green regardless of theme,
-        # which is exactly the "random blue" bug reported in light mode.
-        # "match" keeps a fixed semantic green (recognizable status color,
-        # not tied to the accent palette) but its background now uses a
-        # theme-neutral surface instead of a hardcoded dark-green tint that
-        # would look like a stray dark blob on a light theme.
         self._theme_accent = "#00c4e8"
         self._theme_bg_input = "#101a30"
         self._theme_row_selected = "#122036"
@@ -55,8 +46,6 @@ class LogTab(QFrame):
 
         layout.addStretch()
 
-        # Section 3 — the per-file count badge was removed as noise.
-
         self.set_state("inactive")
 
     def set_theme(self, theme: dict) -> None:
@@ -72,8 +61,7 @@ class LogTab(QFrame):
 
         Driven by TabManager.highlight_active_tabs() from LogFilter results:
         'match' = this file has events in the window, 'inactive' = it doesn't.
-        (Clicking a file no longer sets a persistent 'active' highlight — the
-        file list is display-only.)
+
         """
         self.state = state
         if state == "active":

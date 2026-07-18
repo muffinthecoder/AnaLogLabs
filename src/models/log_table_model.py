@@ -1,4 +1,6 @@
 """
+Owned by: Pooja
+
 LogTableModel — QAbstractTableModel that backs each LogWindowWidget's QTableView.
 
 Binding to a real Qt model (rather than QTableWidget) means that when Hiba's
@@ -8,11 +10,9 @@ logic in LogWindowWidget do not need to change.
 """
 
 from datetime import datetime, timedelta
-
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 import pytz
-
 from src.models.data_classes import RawLogEntry
 
 
@@ -41,7 +41,6 @@ STATUS_COLORS = {
     "Risky": QColor("#e8b840"),
     "Warning": QColor("#e8b840"),
 }
-
 
 class LogTableModel(QAbstractTableModel):
     """Generic table model for displaying RawLogEntry rows.
@@ -106,7 +105,7 @@ class LogTableModel(QAbstractTableModel):
             bottom_right = self.index(self.rowCount() - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole, Qt.ForegroundRole])
 
-    # -- Qt required overrides -------------------------------------------------
+    # Qt required overrides
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._entries)
@@ -228,7 +227,7 @@ class LogTableModel(QAbstractTableModel):
         ms = entry.normalized_timestamp.milliseconds
         return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms:03d}"
 
-    # -- Public API used by LogWindowWidget -------------------------------------
+    # Public API used by LogWindowWidget
 
     def set_display_timezone(self, tz_name: str) -> None:
         """Called by LogWindowWidget.set_timezone_label() (or directly by
@@ -265,7 +264,7 @@ class LogTableModel(QAbstractTableModel):
         self._matched_indices = set(matched_row_indices)
         self.endResetModel()
 
-    # -- Section 4.2 flags (anchor-based, shared across files) ------------------
+    # Section 4.2 flags (anchor-based, shared across files)
 
     def _entry_time(self, entry: RawLogEntry) -> datetime | None:
         nts = entry.normalized_timestamp
@@ -301,7 +300,7 @@ class LogTableModel(QAbstractTableModel):
             return self._entry_time(self._entries[row])
         return None
 
-    # -- Sorting (Section 3 / 4.3) ---------------------------------------------
+    # Sorting (Section 3 / 4.3)
 
     def sort_by_time(self, descending: bool = False) -> None:
         """Re-order rows into true chronological order (post-normalisation).

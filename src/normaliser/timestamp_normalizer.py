@@ -1,50 +1,19 @@
 """
+Owned by: Pooja
+
 timestamp_normalizer.py — implements ALGORITHM: NormalizeTimestamp from
 Section 4.7.5 of the design document (R3).
 
-Owned by: Hiba
 Consumed by: src/parser/log_parser.py (Pooja's module)
 
-Fixes applied for real log data (Week 1 integration):
-    - Added Z-suffix ISO 8601 formats (files 2–8: all sign-in CSVs use
-      "2026-03-25T03:24:52Z" not "2026-03-25T03:24:52")
-    - Added Cisco WLC syslog format (file 1: "Mar 25 09:30:14")
-    - Both of these were the bugs Pooja's test_real_data.py was hitting
-      because _NORMALIZER_AVAILABLE was True on her machine but the
-      normalizer rejected valid timestamps.
-
-Follow-up fix (this revision):
-    - The "Z suffix = UTC" rule previously only held when pandas was
-      installed (_try_pandas_aware was the only code path that recognised
-      it). If pandas was unavailable, a "...Z" timestamp fell through to the
-      plain strptime format chain, which still contained
-      "%Y-%m-%dT%H:%M:%SZ"-style entries — but strptime treats a literal "Z"
-      in a format string as text to match, NOT a timezone marker, so that
-      "successful" parse actually produced a NAIVE datetime, which then got
-      silently localised to source_tz (Perth) instead of being treated as
-      UTC. That shifted every Z-suffixed timestamp by up to 8 hours with no
-      error, purely depending on whether pandas happened to be present on
-      whatever machine ran the app. _try_stdlib_aware() below makes the
-      "Z = UTC" rule (and numeric-offset recognition) hold unconditionally,
-      using only the standard library, with pandas now purely an
-      enhancement for exotic/ambiguous naive formats rather than the sole
-      source of correctness for the most common, safety-critical case. The
-      dead/dangerous Z-suffix entries have been removed from _FORMAT_CHAIN
-      entirely so there is no trap left for a Z-suffixed string to fall into.
 """
 
 import re
 import warnings
 from datetime import datetime
-
 import pytz
 
-# pandas gives us robust, format-flexible timestamp parsing for exotic/naive
-# formats not covered by the explicit chains below (R2 "use pandas"). It's
-# imported defensively so parsing still works even if pandas is unavailable
-# on a given machine — pandas is only ever used as a LAST-RESORT enhancement,
-# never as the sole path for recognising an explicit "Z"/offset timezone
-# marker (see _try_stdlib_aware below for why that distinction matters).
+
 try:
     import pandas as pd
     _PANDAS_AVAILABLE = True
@@ -71,8 +40,6 @@ class TimestampParseError(Exception):
             f"No known format matched."
         )
 
-
-# ---------------------------------------------------------------------------
 # Format chain — Section 4.7.5 step 1, extended for real log data.
 #
 # NOTE: Z-suffix and numeric-offset formats are intentionally NOT in this
@@ -86,14 +53,13 @@ class TimestampParseError(Exception):
 # IMPORTANT ordering rule that still applies: microsecond variants must come
 # before second-only variants, or parsing "...52.123" with the no-ms format
 # truncates.
-# ---------------------------------------------------------------------------
 
 _FORMAT_CHAIN = [
-    # ── ISO 8601 — naive (no timezone marker) ─────────────────────────────
+    # ISO 8601 — naive (no timezone marker)
     "%Y-%m-%dT%H:%M:%S.%f",    # ISO 8601 with microseconds
     "%Y-%m-%dT%H:%M:%S",       # ISO 8601 without microseconds
 
-    # ── Common log formats ─────────────────────────────────────────────────
+    # Common log formats
     "%d/%m/%Y %H:%M:%S.%f",    # DD/MM/YYYY with ms
     "%d/%m/%Y %H:%M:%S",       # DD/MM/YYYY without ms
     "%m-%d-%Y %H:%M:%S",       # US format
@@ -122,7 +88,6 @@ _NAIVE_ISO_FORMATS_FOR_Z_STRIP = [
     "%Y-%m-%dT%H:%M:%S",
 ]
 
-
 def _parse_syslog_ts(raw_ts: str) -> datetime | None:
     """Try to parse a Cisco WLC syslog timestamp like "Mar 25 09:30:14".
 
@@ -149,7 +114,6 @@ def _parse_syslog_ts(raw_ts: str) -> datetime | None:
         except ValueError:
             continue
     return None
-
 
 # Matches a trailing explicit timezone: "Z"/"z", or a "+HH:MM" / "-HHMM" /
 # "+HH" numeric offset at the end of the string. Used to decide whether a raw
@@ -276,7 +240,7 @@ class TimestampNormalizer:
 
         cleaned = raw_ts.strip()
 
-        # ── Step 0: Auto-detect an embedded timezone (R2) ─────────────────
+        # Step 0: Auto-detect an embedded timezone (R2)
         # If the raw string already specifies its own offset ("...Z" or
         # "+04:00"), that offset is authoritative — convert straight to UTC
         # and do NOT re-localise using source_tz. _try_stdlib_aware() is the
@@ -295,7 +259,7 @@ class TimestampNormalizer:
                 is_dst_adjusted=False,
             )
 
-        # ── Step 1: Try the main strptime format chain (naive formats only) ─
+        #  Step 1: Try the main strptime format chain (naive formats only)
         parsed_dt: datetime | None = None
         for fmt in _FORMAT_CHAIN:
             try:
@@ -304,11 +268,11 @@ class TimestampNormalizer:
             except ValueError:
                 continue
 
-        # ── Step 1b: Fallback — try WLC syslog format ─────────────────────
+        # Step 1b: Fallback — try WLC syslog format
         if parsed_dt is None:
             parsed_dt = _parse_syslog_ts(cleaned)
 
-        # ── Step 1c: Last resort — let pandas try (R2 "use pandas") ───────
+        # Step 1c: Last resort — let pandas try (R2 "use pandas")
         # Catches naive formats not in _FORMAT_CHAIN (e.g. "2026-03-25
         # 03:24" without seconds, or locale variants) before giving up.
         if parsed_dt is None:
@@ -317,10 +281,10 @@ class TimestampNormalizer:
         if parsed_dt is None:
             raise TimestampParseError(raw_ts=raw_ts, source_label=source_tz)
 
-        # ── Step 2: Extract milliseconds ──────────────────────────────────
+        # Step 2: Extract milliseconds
         milliseconds = parsed_dt.microsecond // 1000
 
-        # ── Step 3: Attach the source timezone ────────────────────────────
+        # Step 3: Attach the source timezone
         # Only reached for a genuinely NAIVE timestamp (no "Z", no numeric
         # offset — those are both handled and returned in Step 0 above).
         # localize() correctly resolves the DST offset for the DST-observing
@@ -330,7 +294,7 @@ class TimestampNormalizer:
         tz_obj = pytz.timezone(source_tz)
         localised_dt = tz_obj.localize(parsed_dt)
 
-        # ── Step 4: Convert to UTC ────────────────────────────────────────
+        # Step 4: Convert to UTC
         utc_dt = localised_dt.astimezone(pytz.UTC)
 
         is_dst_adjusted = bool(localised_dt.dst())

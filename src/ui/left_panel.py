@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 left_panel.py — the left investigation panel (Sections 1 & 3).
 
 Houses FILTERS ONLY (no logs): the investigation time-range control, a sort
@@ -12,14 +14,11 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
 from src.ui.timeframe_selector import TimeFrameSelector
 from src.ui.tab_manager import TabManager
 from src.ui.session_notes import SessionNotesWidget
-# Add these imports at the top
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QClipboard, QAction
 from PySide6.QtWidgets import QMenu, QApplication
 
 # Sort options exposed to MainWindow (Section 3). Chronological asc/desc.
-# (A "File name (A-Z)" option previously existed here but was removed —
-# it never actually reordered anything meaningful for the investigator.)
 SORT_TIME_ASC = "time_asc"
 SORT_TIME_DESC = "time_desc"
 
@@ -37,11 +36,11 @@ class LeftPanel(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(14)
 
-        # -- File list --------------------------------------------------------
+        # File list
         self.tab_manager = TabManager()
         layout.addWidget(self.tab_manager)
 
-        # -- Sort control (Section 3) -----------------------------------------
+        # Sort control (Section 3)
         sort_title = QLabel("SORT LOGS")
         sort_title.setProperty("class", "SectionTitle")
         layout.addWidget(sort_title)
@@ -55,7 +54,7 @@ class LeftPanel(QWidget):
         )
         layout.addWidget(self.sort_combo)
 
-        # -- Investigation time range ----------------------------------------
+        # Investigation time range
         self.timeframe_selector = TimeFrameSelector(timezone=timezone)
         layout.addWidget(self.timeframe_selector)
 

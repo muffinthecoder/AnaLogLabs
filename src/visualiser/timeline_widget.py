@@ -1,7 +1,8 @@
 """
+Owned by: Hiba
+
 timeline_widget.py — implements Section 6.3.4 Zone 5 subsection 2 (Timeline)
-using PyQtGraph, plus the event-linking visualization concept referenced in
-Minal's task list.
+using PyQtGraph, plus the event-linking visualization concept.
 
 Per the design doc: "Multi-row horizontal timeline. One row per log source,
 each event a small colored block at its timestamp position."
@@ -17,18 +18,14 @@ Event-linking concept:
     real EventCorrelator does not exist yet) and requires no changes once
     real CorrelatedEvent objects are wired in (Section 4.7.4 still TODO).
 
-Owned by: Minal
-Initial code provided by: Fatima
 Consumed by: src/ui/investigation_dashboard.py (replaces the QLabel
 placeholder built by Fatima in _build_timeline_section()).
 """
 
 from datetime import datetime
-
 import pyqtgraph as pg
 import pytz
 from PySide6.QtCore import Qt, Signal
-
 from src.models.data_classes import RawLogEntry
 
 # Vertical spacing between source rows, in plot Y units. Rows are simply

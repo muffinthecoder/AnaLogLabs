@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 toast_notification.py — lightweight, non-blocking action feedback.
 
 Several actions in the app previously happened silently: apply/clear filter,
@@ -35,7 +37,7 @@ TOAST_EDGE_PAD = 10       # never let the toast touch the window edge
 TOAST_DURATION_MS = 2800
 TOAST_ANIM_MS = 200
 
-# Fixed semantic colors — universal enough to stay constant across themes.
+# semantic colors — universal enough to stay constant across themes.
 SUCCESS_COLOR = "#1fd1c0"
 WARNING_COLOR = "#ffab2e"
 
@@ -49,8 +51,7 @@ class ToastNotification(QWidget):
         self.setObjectName("ToastCard")
         self.setFixedWidth(TOAST_WIDTH)
 
-        # Themeable — defaults match what shipped before theme switching
-        # existed, in case set_theme() is never called.
+        # Themeable
         self._bg = "#0e1526"
         self._border = "#1c2740"
         self._text_primary = "#c8d3ea"
@@ -98,7 +99,7 @@ class ToastNotification(QWidget):
 
         self.hide()
 
-    # -- Public API ------------------------------------------------------------
+    # Public API
 
     def set_theme(self, theme: dict) -> None:
         self._bg = theme["bg_input"]
@@ -159,7 +160,7 @@ class ToastNotification(QWidget):
         """
         self._reposition()
 
-    # -- Internal ----------------------------------------------------------------
+    #  Internal
 
     def _fade_out(self) -> None:
         self._fade.stop()

@@ -1,21 +1,18 @@
 """
-csv_parser.py — parses CSV log files using csv.DictReader.
-
-Per Section 4.7.1 step 2: 'IF format == "csv": Parse using csv.DictReader'.
-
 Owned by: Pooja
 Initial code provided by: Fatima
+
+csv_parser.py — parses CSV log files using csv.DictReader.
+Per Section 4.7.1 step 2: 'IF format == "csv": Parse using csv.DictReader'.
 Consumed by: log_parser.py
 """
 
 import csv
 from pathlib import Path
 
-
 class MalformedFileError(Exception):
     """Raised when a file is so badly broken that no rows can be recovered."""
     pass
-
 
 def parse_csv(file_path: str) -> list[dict]:
     """Reads a CSV log file and returns a list of raw row dicts.

@@ -1,4 +1,6 @@
 """
+Owned by: Minal
+
 TopNavBar — fixed top bar.
 
 Controls, left to right:
@@ -23,7 +25,6 @@ from src.ui.theme import THEMES, THEME_LABELS, DEFAULT_THEME
 
 class TopNavBar(QWidget):
     """Top bar."""
-
     import_logs_clicked = Signal()
     sync_scroll_toggled = Signal(bool)
     display_timezone_changed = Signal(str)  # IANA name — the "convert to" zone
@@ -117,7 +118,7 @@ class TopNavBar(QWidget):
         self.clear_flags_button.clicked.connect(self.clear_flags_clicked.emit)
         layout.addWidget(self.clear_flags_button)
 
-    # -- construction helpers --------------------------------------------------
+    #  construction helpers
 
     def _add_separator(self, layout: QHBoxLayout) -> None:
         sep = QFrame()
@@ -158,7 +159,7 @@ class TopNavBar(QWidget):
         self.sync_scroll_button.setStyleSheet("")  # force re-polish
         self.sync_scroll_toggled.emit(checked)
 
-    # -- public API ------------------------------------------------------------
+    # public API
 
     def current_display_timezone(self) -> str:
         return self.display_tz_dropdown.currentData() or DEFAULT_TIMEZONE
@@ -168,14 +169,6 @@ class TopNavBar(QWidget):
         the "Convert to" dropdown — used after the investigator picks a
         timezone in TimezoneImportDialog at import time, so the dropdown
         doesn't silently disagree with what was just chosen.
-
-        Signals are blocked while setting the index: this method is called
-        FROM the import flow (which already applies the chosen timezone
-        directly via MainWindow._on_display_tz_changed), so letting the
-        dropdown's own currentIndexChanged fire here would just re-run that
-        same update a second time for no reason. Selecting the SAME zone
-        already active is a no-op either way (findData returns the already-
-        current index), so this is safe to call unconditionally.
         """
         self.display_tz_dropdown.blockSignals(True)
         self._select(self.display_tz_dropdown, iana_tz)

@@ -1,4 +1,7 @@
 """
+Owned by: Minal
+Initial code provided by: Fatima
+
 activity_frequency_chart.py — implements Section 6.3.4 Zone 5 subsection 1
 (Activity Frequency Chart) using PyQtGraph.
 
@@ -6,8 +9,6 @@ Per the design doc: "Bars within the investigation window render at full
 opacity in source color; bars outside are dimmed. X-axis shows start,
 midpoint, end of investigation window."
 
-Owned by: Minal
-Initial code provided by: Fatima
 Consumed by: src/ui/investigation_dashboard.py (replaces the QLabel
 placeholder built by Fatima in _build_activity_chart_section()).
 """
@@ -57,8 +58,8 @@ class ActivityFrequencyChart(pg.PlotWidget):
         self.showGrid(x=False, y=True, alpha=0.15)
         self.getAxis("left").setStyle(tickLength=0)
         self.getAxis("bottom").setStyle(tickLength=0)
-        self.getAxis("left").setTextPen(pg.mkPen("#161d35"))   # <-- CHANGED
-        self.getAxis("bottom").setTextPen(pg.mkPen("#161d35")) # <-- CHANGED
+        self.getAxis("left").setTextPen(pg.mkPen("#161d35"))
+        self.getAxis("bottom").setTextPen(pg.mkPen("#161d35"))
         self.getPlotItem().setMenuEnabled(False)
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
@@ -87,7 +88,7 @@ class ActivityFrequencyChart(pg.PlotWidget):
 
         self._show_empty_state()
 
-    # -- Public API ------------------------------------------------------------
+    #  Public API
 
     def set_entries(self, entries_by_source: dict[str, list[RawLogEntry]], colors: dict[str, str]) -> None:
         """Replaces all chart data. Called by InvestigationDashboard
@@ -128,7 +129,7 @@ class ActivityFrequencyChart(pg.PlotWidget):
         self._window_end = None
         self._redraw()
 
-    # -- Internal: bucketing + drawing -----------------------------------------
+    # Internal: bucketing + drawing
 
     def _all_valid_entries(self) -> list[tuple[str, RawLogEntry]]:
         """Flattens self._entries_by_source into (source_label, entry)

@@ -1,27 +1,20 @@
 """
+Owned by: Minal
+
 visualization_row.py — the top ~1/3 visualization area (Sections 1 & 5).
 
-Composition:
-    ┌───────────────────────┬──────────────────────┬──────────────────────┐
-    │  Heatmap (full range) │  Spike chart (range) │ Bubble Chart (range) │  ← resizable H-splitter
-    ├───────────────────────┴──────────────────────┴──────────────────────┤
-    │  Shared legend: file → colour swatch                                │
-    └─────────────────────────────────────────────────────────────────────┘
 """
 
 from PySide6.QtCore import Qt, QEvent, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter, QFrame, QStackedWidget,
                                QPushButton, QFileDialog)
-
 from src.ui.theme import THEMES, DEFAULT_THEME
 
 _FALLBACK_THEME = THEMES[DEFAULT_THEME]
-
-from PySide6.QtCore import QTimer  # <-- Add this import
+from PySide6.QtCore import QTimer
 from src.visualiser.activity_heatmap import ActivityHeatmap
 from src.visualiser.spike_chart import SpikeChart
 from src.visualiser.bubble_chart import BubbleChart
-
 from PySide6.QtWidgets import QFileDialog
 from PySide6.QtGui import QPixmap, QPainter, QIcon
 

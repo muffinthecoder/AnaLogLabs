@@ -1,15 +1,7 @@
 """
+Owned by: Fatima
+
 MainWindow — application shell.
-
-Layout:
-
-    ┌───────────────────────────── TOP BAR ─────────────────────────────┐
-    │  import · sync scroll · convert-to timezone · stats                │
-    ├────────────┬──────────────────────────────────────────────────────┤
-    │            │  VISUALIZATION ROW  (heatmap | spike) + legend        │  ~1/3
-    │  LEFT      ├──────────────────────────────────────────────────────┤
-    │  PANEL     │  LOG VIEWING SPACE  (up to 8 windows) + event detail  │  ~2/3
-    └────────────┴──────────────────────────────────────────────────────┘
 
 MainWindow only wires signals; parsing/filtering/normalisation live in the
 data/application layers.
@@ -17,14 +9,12 @@ data/application layers.
 
 import sys
 from datetime import timedelta
-
 from PySide6.QtCore import Qt, QSettings, QTimer, QEvent
 from PySide6.QtGui import QPalette, QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
     QMdiArea, QMdiSubWindow, QStackedWidget, QSplitter, QMessageBox, QDialog, QLabel,
 )
-
 from src.ui.theme import THEMES, THEME_LABELS, DEFAULT_THEME, build_stylesheet
 from src.ui.top_nav_bar import TopNavBar
 from src.ui.left_panel import LeftPanel, SORT_TIME_ASC, SORT_TIME_DESC
@@ -57,14 +47,13 @@ class MainWindow(QMainWindow):
 
         self._settings = QSettings("PentalogTech", "AnaLogLabs")
 
-        # Theme (Section: switchable color themes) — restored from last
-        # session if present, otherwise the original palette by default.
+        # Theme (Section: switchable color themes)
         self._current_theme = self._settings.value("theme", DEFAULT_THEME)
         if self._current_theme not in THEMES:
             self._current_theme = DEFAULT_THEME
         self.setStyleSheet(build_stylesheet(THEMES[self._current_theme]))
 
-        # -- shared state ------------------------------------------------------
+        # shared state
         self.color_map = SourceColorMap(palette=THEMES[self._current_theme]["accent_palette"])
         self._scroll_sync = ScrollSyncManager()
         # True while the unified single-scrollbar lock is active.
@@ -83,8 +72,7 @@ class MainWindow(QMainWindow):
         # source_label -> full entry list (post-normalisation), for the charts.
         self._entries_by_source: dict[str, list[RawLogEntry]] = {}
 
-        # Shared ±30s flag anchors (absolute UTC datetimes) — set MANUALLY by
-        # the investigator only; the time-range filter never flags anything.
+        # Shared ±30s flag anchors (absolute UTC datetimes)
         self._flag_anchors: list = []
 
         # Active filter state.
@@ -96,7 +84,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._restore_layout()
 
-    # -- UI construction ------------------------------------------------------------
+    # UI construction
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -141,7 +129,7 @@ class MainWindow(QMainWindow):
         self.panels_area.setBackground(QColor(BACKGROUND_COLOR))
 
         # Shown only while no log file is open — otherwise this whole area is
-        # just an unexplained empty void, which is what prompted this.
+        # just an unexplained empty void
         self._empty_workspace_label = QLabel(
             "No logs loaded yet\nImport a log file to see it here.", self.panels_area
         )
@@ -237,7 +225,7 @@ class MainWindow(QMainWindow):
         self.left_panel.timeframe_selector.filter_cleared.connect(self._on_filter_cleared)
         self.left_panel.session_notes.notes_exported.connect(self._on_notes_exported)
 
-    # -- Layout persistence --------------------------------------------------------
+    #  Layout persistence
 
     def _restore_layout(self) -> None:
         geo = self._settings.value("window_geometry")
@@ -290,7 +278,7 @@ class MainWindow(QMainWindow):
             f"color: {theme['text_secondary']}; font-size: 13px; background: transparent;"
         )
 
-    # -- Import --------------------------------------------------------------------
+    # Import
 
     def _on_import_logs(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -370,8 +358,6 @@ class MainWindow(QMainWindow):
         # run below, not just at the very end of this method).
         if chosen_tz != self._display_tz:
             self._on_display_tz_changed(chosen_tz)
-        # Reflect the choice back on the "Convert to" dropdown so it never
-        # silently disagrees with what was just confirmed in the dialog.
         self.top_nav.set_display_timezone(chosen_tz)
 
         # Newest-first (or the current sort) is applied to every panel.
@@ -445,7 +431,7 @@ class MainWindow(QMainWindow):
         if not any_max:
             self.panels_area.tileSubWindows()
 
-    # -- Timezone (single "convert to" dropdown) ----------------------------------
+    # Timezone (single "convert to" dropdown)
 
     def _on_display_tz_changed(self, iana_tz: str) -> None:
         """Change only how times are RENDERED (the CONVERTED TIMESTAMP column,
@@ -516,7 +502,7 @@ class MainWindow(QMainWindow):
                 break
         return utc_offset_label(iana_tz, reference_dt)
 
-    # -- Sort ----------------------------------------------------------------------
+    # Sort feature
 
     def _on_sort_changed(self, _code: str) -> None:
         self._apply_sort()
@@ -531,7 +517,7 @@ class MainWindow(QMainWindow):
             for panel in self.log_panels.values():
                 panel.table_model.sort_by_time(descending=descending)
 
-    # -- Filter / time range -------------------------------------------------------
+    #  Filter / time range
 
     def _on_filter_applied(self, config: FilterConfig) -> None:
         self._last_config = config
@@ -588,7 +574,7 @@ class MainWindow(QMainWindow):
         self.toast.show_toast("Session notes exported", os.path.basename(filepath), kind="success",
                               anchor=self.left_panel.session_notes.export_btn)
 
-    # -- Flags (manual only) -------------------------------------------------------
+    # Flags (manual only)
 
     def _on_flag_toggle(self, entry: RawLogEntry) -> None:
         nts = entry.normalized_timestamp
@@ -658,7 +644,7 @@ class MainWindow(QMainWindow):
         self.toast.show_toast("Flags cleared", f"{count} {noun} removed", kind="success",
                               anchor=self.top_nav.clear_flags_button)
 
-    # -- Sync scroll → unified time-based lock ------------------------------------
+    # Sync scroll → unified time-based lock
 
     def _on_sync_scroll_toggled(self, enabled: bool) -> None:
         """CASE 1 (no valid time range) → prompt, do not enable.
@@ -735,7 +721,7 @@ class MainWindow(QMainWindow):
         if panel is not None:
             self._scroll_sync.sync_scroll(panel, center_row)
 
-    # -- Row / tab interaction -----------------------------------------------------
+    # Row / tab interaction
 
     def _on_row_selected(self, entry: RawLogEntry) -> None:
         self.event_detail_panel.show_event(entry, correlation_count=0)
@@ -785,7 +771,7 @@ class MainWindow(QMainWindow):
         for other in self.log_panels.values():
             other.scroll_to_time(t)
 
-    # -- Panel lifecycle -----------------------------------------------------------
+    # Panel lifecycle
 
     def _on_panel_closed(self, source_label: str) -> None:
         self.log_panels.pop(source_label, None)
@@ -802,9 +788,6 @@ class MainWindow(QMainWindow):
 
         self._refresh_visualization()
         self._recompute_stats()
-        # No anchor: whatever triggered this (the panel's close button) no
-        # longer exists by this point, so this one intentionally falls back
-        # to the corner rather than anchoring to something already gone.
         self.toast.show_toast("Log window closed", source_label, kind="neutral")
 
     def _on_restore_size_requested(self, source_label: str) -> None:
@@ -815,7 +798,7 @@ class MainWindow(QMainWindow):
         sub.resize(480, 380)
         self.toast.show_toast("Window restored", source_label, kind="info", anchor=self.sender())
 
-    # -- Pop-out / dock-back -------------------------------------------------------
+    # Pop-out / dock-back
 
     def _on_detach_requested(self, source_label: str) -> None:
         # Pop-out and the unified lock are mutually exclusive — leave lock first.
@@ -854,7 +837,7 @@ class MainWindow(QMainWindow):
     def _on_floating_closed(self, source_label: str) -> None:
         self._on_panel_closed(source_label)
 
-    # -- Charts + stats ------------------------------------------------------------
+    # Charts + stats
 
     def _refresh_visualization(self) -> None:
         if self._entries_by_source:
