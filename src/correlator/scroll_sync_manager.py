@@ -1,4 +1,6 @@
 """
+Owned by: Hiba
+
 scroll_sync_manager.py — implements ALGORITHM: SyncScroll from Section 4.7.3
 of the design document.
 
@@ -6,13 +8,10 @@ Ensures all open log windows scroll together based on the same UTC timestamp
 position, not pixel offset, since different logs have different row counts
 and event densities.
 
-Owned by: Hiba
 Consumed by: src/ui/main_window.py (wires LogWindowWidget.scrolled signal here)
 """
 
-import bisect
 from datetime import datetime
-
 from src.models.data_classes import RawLogEntry
 
 
@@ -57,7 +56,10 @@ class ScrollSyncManager:
                 scrolled. Must have a `.source_label` attribute and a
                 `.table_model.get_entries()` method returning entries
                 sorted ascending by utc_datetime.
-            scroll_position: the top-visible row index in source_window.
+            scroll_position: the row index visible at the CENTER of
+                source_window's viewport (see LogWindowWidget._on_scroll for
+                why the center row is used as the anchor rather than the top
+                row).
 
         Side effect:
             Calls `.receive_sync_scroll(index)` on every OTHER registered
@@ -75,15 +77,15 @@ class ScrollSyncManager:
 
         try:
             # Step 3 — get the anchor timestamp from the source window's
-            # currently top-visible entry.
+            # currently center-visible entry.
             source_entries = source_window.table_model.get_entries()
             if not source_entries or scroll_position >= len(source_entries):
                 return
 
-            top_entry: RawLogEntry = source_entries[scroll_position]
-            if top_entry.normalized_timestamp is None:
+            anchor_entry: RawLogEntry = source_entries[scroll_position]
+            if anchor_entry.normalized_timestamp is None:
                 return
-            anchor_ts = top_entry.normalized_timestamp.utc_datetime
+            anchor_ts = anchor_entry.normalized_timestamp.utc_datetime
 
             # Step 4 — for every other registered window, binary search for
             # the closest entry by timestamp, then move it there.
@@ -104,36 +106,57 @@ class ScrollSyncManager:
             # dropped.
             self.is_syncing = False
 
+    def move_all_to_timestamp(self, anchor_ts: datetime) -> None:
+        """Moves EVERY currently registered window to the row whose timestamp
+        is closest to `anchor_ts`, with no source window involved.
+
+        Used the moment Sync Scroll is switched on: the investigator's
+        already-applied highlighted time range has a start timestamp, and that
+        becomes the reference/datum every open panel is snapped to immediately,
+        before any further user-driven scrolling takes over and starts
+        panel-to-panel syncing via sync_scroll() above.
+
+        Deliberately a separate entry point from sync_scroll() rather than
+        routing through it with a fake "source" — there IS no source panel for
+        this move, and forcing one in just to reuse the loop would skip
+        whichever panel matched that fake source (sync_scroll always skips
+        source_window.source_label); here every panel needs to move.
+        """
+        if self.is_syncing:
+            return
+        self.is_syncing = True
+        try:
+            for window in self.registered_windows.values():
+                entries = window.table_model.get_entries()
+                if not entries:
+                    continue
+                closest_index = self._find_closest_index(entries, anchor_ts)
+                window.receive_sync_scroll(closest_index)
+        finally:
+            self.is_syncing = False
+
     @staticmethod
     def _find_closest_index(entries: list[RawLogEntry], anchor_ts: datetime) -> int:
-        """Binary search for the index in `entries` (sorted ascending by
-        utc_datetime) whose timestamp is closest to anchor_ts.
+        """Return the MODEL ROW INDEX in `entries` whose timestamp is closest
+        to anchor_ts.
 
-        Uses Python's bisect module against a pre-extracted list of
-        datetimes for O(log n) lookup, matching the "Perform binary search"
-        instruction in Section 4.7.3 step 4.
+        A linear scan (rather than bisect) on purpose: `entries` is in the
+        panel's CURRENT display order, which may be newest-first (descending)
+        as well as oldest-first — bisect assumes ascending and would return the
+        wrong row under a descending sort. Scanning is also None-safe: it
+        returns the row's actual position even when earlier rows have no
+        normalized timestamp (a bisect over a filtered timestamp list would
+        desync the index). For this tool's log sizes the scan cost is
+        negligible, and correctness across sort orders matters more here.
         """
-        timestamps = [
-            e.normalized_timestamp.utc_datetime
-            for e in entries
-            if e.normalized_timestamp is not None
-        ]
-        if not timestamps:
-            return 0
-
-        # bisect_left gives the insertion point — the entry at this index
-        # is the first one >= anchor_ts.
-        pos = bisect.bisect_left(timestamps, anchor_ts)
-
-        if pos == 0:
-            return 0
-        if pos == len(timestamps):
-            return len(timestamps) - 1
-
-        # Compare the candidate just before and just after the insertion
-        # point, return whichever is numerically closer to anchor_ts.
-        before = timestamps[pos - 1]
-        after = timestamps[pos]
-        if (anchor_ts - before) <= (after - anchor_ts):
-            return pos - 1
-        return pos
+        best_index = 0
+        best_delta = None
+        for index, entry in enumerate(entries):
+            nts = entry.normalized_timestamp
+            if nts is None:
+                continue
+            delta = abs((nts.utc_datetime - anchor_ts).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_index = index
+        return best_index

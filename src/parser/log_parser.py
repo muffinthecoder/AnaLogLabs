@@ -1,7 +1,7 @@
 """
+Owned by: Pooja
 log_parser.py — implements ALGORITHM: ImportAndParse from Section 4.7.1.
 
-Owned by: Pooja
 """
 
 from pathlib import Path
@@ -11,13 +11,14 @@ from src.parser.txt_parser import parse_txt
 from src.models.data_classes import LogFile, RawLogEntry
 from src.correlator.timeline_merger import TimelineMerger
 
-"""from src.models.data_classes import LogFile, RawLogEntry
+"""
+from src.models.data_classes import LogFile, RawLogEntry
 from csv_parser import parse_csv, MalformedFileError
 from xlsx_parser import parse_xlsx
 from txt_parser import parse_txt
 """
 
-# TimestampNormalizer is Hiba's module (src/normaliser/timestamp_normalizer.py).
+
 # Imported here once it exists; until then normalization is skipped and
 # normalized_timestamp is left as None. The try/except block in parse_file()
 # handles ImportError gracefully so the rest of the pipeline still runs.
@@ -34,7 +35,7 @@ REQUIRED_FIELDS = {"timestamp"}
 # Maps every known raw column header -> canonical field name.
 # Covers all 8 log sources confirmed from the client (Mike) briefing.
 _FIELD_NAME_ALIASES = {
-    # ── Timestamp variants ──────────────────────────────────────────────
+    # Timestamp variants
     "timestamp":                    "timestamp",
     "time":                         "timestamp",
     "date_utc":                     "timestamp",
@@ -42,7 +43,7 @@ _FIELD_NAME_ALIASES = {
     "event_time":                   "timestamp",
     "datetime":                     "timestamp",
 
-    # ── Username / identity variants ────────────────────────────────────
+    # Username / identity variants
     "username":                     "username",
     "user":                         "username",
     "user_username":                "username",
@@ -50,43 +51,43 @@ _FIELD_NAME_ALIASES = {
     "account_name":                 "username",
     "service_principal_name":       "username",   # App/MSI sign-in logs
 
-    # ── IP address variants ─────────────────────────────────────────────
+    # IP address variants
     "ip_address":                   "ip_address",
     "ip":                           "ip_address",
     "source_ip":                    "ip_address",
     "client_ip":                    "ip_address",
     "ip_address_seen_by_resource":  "ip_address",
 
-    # ── Status / result variants ────────────────────────────────────────
+    # Status / result variants
     "status":                       "status",
     "result":                       "status",
     "outcome":                      "status",
     "succeeded":                    "status",     # Auth details CSVs
 
-    # ── Application / resource ──────────────────────────────────────────
+    # Application / resource
     "application":                  "application",
     "resource":                     "resource",
 
-    # ── Device / client info ────────────────────────────────────────────
+    # Device / client info
     "device_id":                    "device_id",
     "client_app":                   "client_app",
     "browser":                      "browser",
     "operating_system":             "operating_system",
     "user_agent":                   "user_agent",
 
-    # ── MFA ─────────────────────────────────────────────────────────────
+    # MFA
     "multifactor_authentication_result":      "mfa_result",
     "multifactor_authentication_auth_method": "mfa_method",
 
-    # ── Conditional access ───────────────────────────────────────────────
+    # Conditional access
     "conditional_access":           "conditional_access",
 
-    # ── WLC-specific (parsed from syslog freetext by txt_parser) ────────
+    # WLC-specific (parsed from syslog freetext by txt_parser)
     "mac":                          "mac_address",
     "ssid":                         "ssid",
     "ap":                           "access_point",
 
-    # ── MUPC (MDE) specific ─────────────────────────────────────────────
+    # MUPC (MDE) specific
     "machine_id":                   "device_id",
     "computer_name":                "hostname",
     "action_type":                  "action_type",
@@ -203,7 +204,7 @@ class LogParser:
 
         result = ParsedFileResult(source_label=log_file.source_label)
 
-        # ── Dispatch to format-specific parser ──────────────────────────
+        # Dispatch to format-specific parser
         try:
             if log_file.file_format == "csv":
                 raw_rows = parse_csv(log_file.file_path)
@@ -218,7 +219,7 @@ class LogParser:
             result.file_error = str(exc)
             return result
 
-        # ── Row-level processing ─────────────────────────────────────────
+        # Row-level processing
         for row_index, raw_row in enumerate(raw_rows):
             mapped_row = cls._map_fields(raw_row)
             is_valid, reason = cls._validate_row(mapped_row)
@@ -237,7 +238,7 @@ class LogParser:
                 normalized_timestamp=None,
             )
 
-            # ── Timestamp normalisation (Hiba's module) ──────────────────
+            # Timestamp normalisation
             # Skipped gracefully until TimestampNormalizer is implemented.
             # Once src/normaliser/timestamp_normalizer.py exists, this block
             # will run automatically — no changes needed here.
@@ -276,7 +277,7 @@ class LogParser:
         """
         results = [cls.parse_file(path) for path in file_paths]
 
-        # ── Section 4.7.1 step 5 — unified chronological sort ───────────────
+        # Section 4.7.1 step 5 — unified chronological sort
         # Collect every valid entry across all files into one flat list,
         # merge-sort it by utc_datetime, then split back out per source so
         # each LogWindowWidget gets its own sorted slice.

@@ -1,4 +1,6 @@
 """
+Owned by: Fatima
+
 LogWindowWidget — displays raw log entries from a single log source in a
 scrollable, read-only table (Section 5.2, Presentation Layer).
 
@@ -12,11 +14,11 @@ Multiple LogWindowWidgets are opened simultaneously and arranged side-by-side
 inside the MainWindow's central workspace (Zone 3).
 """
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QColor, QAction, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, QFrame, QSlider,
-    QHeaderView, QPushButton, QAbstractItemView,
+    QHeaderView, QPushButton, QAbstractItemView, QMenu, QApplication,
 )
 
 from src.models.data_classes import RawLogEntry
@@ -52,12 +54,36 @@ class LogWindowWidget(QWidget):
     # is doing.
     restore_size_requested = Signal(str)  # source_label
 
+    # R1 — emitted when the header "Pop out" button is clicked. MainWindow
+    # detaches this panel from the MDI area into a free-floating top-level
+    # window that can be moved anywhere on the desktop.
+    detach_requested = Signal(str)  # source_label
+
+    # Section 4.2 — emitted when the investigator flags/unflags a row. Carries
+    # the RawLogEntry so MainWindow can add/remove a shared ±30s flag anchor.
+    flag_toggle_requested = Signal(object)  # RawLogEntry
+
     def __init__(self, source_label: str, color_hex: str, columns: list[str], parent=None):
         super().__init__(parent)
         self.source_label = source_label
         self.color_hex = color_hex
+        # Themeable general-UI accent (distinct from color_hex, which is
+        # this SOURCE's own identifying color) — used by the header action
+        # buttons below, which hardcoded cyan regardless of theme before.
+        self._theme_accent = "#00c4e8"
+        self._theme_badge_bg = "#D1EFF0"
+        self._theme_badge_text = "#000000"
+        self._theme_header_text = "#c8d3ea"
+        self._theme_body_text = "#7284a8"
         self.scroll_position = 0
         self.matched_indices: list[int] = []
+
+        # Guard flag used to skip OUR OWN _on_scroll() handler during a
+        # code-driven scroll (receive_sync_scroll), WITHOUT scrollbar.
+        # blockSignals(True) — that would also block Qt's own internal wiring
+        # that moves the visible rows to match the scrollbar, so the handle
+        # would jump while the rows on screen never did.
+        self._suppress_scroll_signal = False
 
         self._build_ui(columns)
 
@@ -81,60 +107,81 @@ class LogWindowWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ---- Panel header --------------------------------------------------
+        # Panel header
         header = QFrame()
         header.setObjectName("LogPanelHeader")
+        # Section 5.3 — a coloured top accent tied to the file's palette colour,
+        # so a window (docked or popped out) is visually correlatable to its
+        # heatmap row / spike series / legend swatch.
+        header.setStyleSheet(
+            f"QFrame#LogPanelHeader {{ border-top: 2px solid {self.color_hex}; }}"
+        )
+        self._header_frame = header  # kept for set_color() on a theme switch
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 6, 10, 6)
 
         dot = QLabel()
         dot.setFixedSize(8, 8)
         dot.setStyleSheet(f"background-color: {self.color_hex}; border-radius: 4px;")
+        self._dot_label = dot  # kept for set_color() on a theme switch
         header_layout.addWidget(dot)
 
         self.filename_label = QLabel(f"{self.source_label}.csv")
-        self.filename_label.setStyleSheet("font-weight: 500; font-size: 11px;")
+        # self.filename_label.setStyleSheet("QLabel { color: #ffffff; font-weight: bold; font-size: 13px; }")
+        self.filename_label.setObjectName("FilenameLabel")  # <-- 1. Assign a unique ID
         header_layout.addWidget(self.filename_label)
 
-        self.timezone_badge = QLabel("UTC+4")
+        self.timezone_badge = QLabel("UTC+8")
         self.timezone_badge.setStyleSheet(
-            "background-color: #1e2a4a; color: #4a5a7a; font-size: 10px; "
+            f"background-color: {self._theme_badge_bg}; color: {self._theme_badge_text}; font-size: 11px; "
             "padding: 1px 5px; border-radius: 10px;"
         )
         header_layout.addWidget(self.timezone_badge)
 
         header_layout.addStretch()
 
-        # Guaranteed-working restore/resize toggle — see restore_size_
-        # requested's docstring above for why this exists alongside (not
-        # instead of) the native QMdiSubWindow title-bar button. Uses a
-        # text label with a visible border (rather than a muted icon-only
-        # glyph) because the icon version blended into the dark background
-        # and was effectively invisible — found during testing when it was
-        # only ever located by accident.
+        # working restore/resize toggle — see restore_size_
         self.restore_button = QPushButton("Restore window size")
         self.restore_button.setObjectName("RestoreSizeButton")
         self.restore_button.setFixedHeight(20)
         self.restore_button.setToolTip("Click if a maximized window won't resize back down")
         self.restore_button.setStyleSheet(
             "QPushButton#RestoreSizeButton { "
-            "background-color: transparent; color: #00c4e8; border: 1px solid #00c4e8; "
-            "font-size: 10px; border-radius: 3px; padding: 0 8px; } "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
             "QPushButton#RestoreSizeButton:hover { "
-            "background-color: #00c4e8; color: #0a0e1a; }"
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
         )
         self.restore_button.clicked.connect(
             lambda: self.restore_size_requested.emit(self.source_label)
         )
         header_layout.addWidget(self.restore_button)
 
+        # R1 — pop this panel out into a free-floating desktop window.
+        self.detach_button = QPushButton("Pop out")
+        self.detach_button.setObjectName("DetachButton")
+        self.detach_button.setFixedHeight(20)
+        self.detach_button.setToolTip("Detach this log into a movable floating window")
+        self.detach_button.setStyleSheet(
+            "QPushButton#DetachButton { "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#DetachButton:hover { "
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
+        )
+        self.detach_button.clicked.connect(
+            lambda: self.detach_requested.emit(self.source_label)
+        )
+        header_layout.addWidget(self.detach_button)
+
         self.row_count_label = QLabel("0 rows")
-        self.row_count_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
+        self.row_count_label.setStyleSheet(
+            f"font-size: 11px; color: {self._theme_header_text}; background: transparent;")
         header_layout.addWidget(self.row_count_label)
 
         layout.addWidget(header)
 
-        # ---- Table -----------------------------------------------------------
+        # Table
         self.table_model = LogTableModel(columns=columns)
         self.table_view = QTableView()
         self.table_view.setModel(self.table_model)
@@ -200,36 +247,47 @@ class LogWindowWidget(QWidget):
 
         self.table_view.clicked.connect(self._on_row_clicked)
 
-        # TODO (Section 4.7.3 SyncScroll):
-        #   Connect verticalScrollBar().valueChanged to _on_scroll() so
-        #   ScrollSyncManager can detect when this panel scrolls. Placeholder
-        #   wired below — real binary-search-by-timestamp logic belongs in
-        #   ScrollSyncManager, not here.
+        # R5 — right-click a row to flag/unflag it. A flagged event is marked
+        # here and mirrored at the corresponding time in every other panel.
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_context_menu)
+
+        # Copy support (reliable): Ctrl+C is caught via an event filter on the
+        # table view — a QShortcut with no explicit context can fail to fire in
+        # an MDI/reparented panel, which is why the earlier copy didn't work.
+        # The event filter only reacts when THIS table actually has focus.
+        self.table_view.installEventFilter(self)
+
+        # Sync scroll: a scrollbar move emits `scrolled`, which the unified
+        # LockedWorkspace listens to (reading this panel's CENTER timestamp and
+        # aligning every other panel by nearest timestamp). Programmatic moves
+        # via center_on_row()/receive_sync_scroll() block this signal to avoid
+        # recursive sync.
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
 
         layout.addWidget(self.table_view)
 
-        # ---- Scroll position indicator bar -----------------------------------
+        # Scroll position indicator bar
         sync_bar = QFrame()
         sync_bar.setObjectName("ScrollSyncBar")
         sync_layout = QHBoxLayout(sync_bar)
         sync_layout.setContentsMargins(10, 4, 10, 4)
 
-        sync_label = QLabel("Scroll position")
-        sync_label.setStyleSheet("font-size: 10px; color: #4a5a7a;")
-        sync_layout.addWidget(sync_label)
+        self._sync_label = QLabel("Scroll position")
+        self._sync_label.setStyleSheet(f"font-size: 11px; color: {self._theme_body_text}; background: transparent;")
+        sync_layout.addWidget(self._sync_label)
 
         self.scroll_indicator = QSlider(Qt.Horizontal)
         self.scroll_indicator.setEnabled(False)  # display-only, driven programmatically
         sync_layout.addWidget(self.scroll_indicator)
 
         self.scroll_timestamp_label = QLabel("--:--")
-        self.scroll_timestamp_label.setStyleSheet(f"font-size: 10px; color: {self.color_hex};")
+        self.scroll_timestamp_label.setStyleSheet(f"font-size: 11px; color: {self.color_hex};")
         sync_layout.addWidget(self.scroll_timestamp_label)
 
         layout.addWidget(sync_bar)
 
-    # -- Public API --------------------------------------------------------------
+    # Public API
 
     def load_rows(self, entries: list[RawLogEntry]) -> None:
         """Load entries filtered to this source_label (Section 4.7.1 step 6)."""
@@ -259,7 +317,8 @@ class LogWindowWidget(QWidget):
         # generic floor (80px) since log_parser.py's _FIELD_NAME_ALIASES
         # covers many but not all possible source columns.
         column_min_widths = {
-            "timestamp": 160,
+            "original_log_time": 175,
+            "timestamp": 130,
             "date": 160,
             "username": 130,
             "ip_address": 120,
@@ -286,8 +345,15 @@ class LogWindowWidget(QWidget):
 
     def receive_sync_scroll(self, row_index: int) -> None:
         """Called by ScrollSyncManager — scrolls this panel to row_index
-        WITHOUT emitting the scrolled signal, preventing recursive sync
-        loops (Section 4.7.3 step 4).
+        WITHOUT re-triggering sync (Section 4.7.3 step 4).
+
+        Uses the `_suppress_scroll_signal` guard rather than
+        scrollbar.blockSignals(True): blockSignals silences EVERY slot on the
+        scrollbar's valueChanged — including Qt's own internal wiring that
+        moves the visible rows to match the scrollbar value — so the handle
+        jumped while the content on screen never did. The guard flag only
+        short-circuits our own _on_scroll(), leaving Qt's scroll-the-viewport
+        connection intact.
         """
         if not self.table_model.rowCount():
             return
@@ -298,23 +364,121 @@ class LogWindowWidget(QWidget):
         # what actually guards against an out-of-range row_index.
         row_index = max(0, min(row_index, self.table_model.rowCount() - 1))
 
-        # Block the scroll signal so ScrollSyncManager doesn't pick this up
-        # as a new user-initiated scroll and trigger another sync round —
-        # the same recursion the docstring above warns about.
-        scrollbar = self.table_view.verticalScrollBar()
-        scrollbar.blockSignals(True)
+        self._suppress_scroll_signal = True
         try:
             index = self.table_model.index(row_index, 0)
-            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtTop)
-            self.scroll_position = scrollbar.value()
-            # _on_scroll() is what normally calls this, but it's skipped
-            # here since blockSignals(True) prevents it from firing — so
-            # the slider/timestamp label need updating directly, or they'd
-            # drift out of sync with the table every time another panel's
-            # scroll drives this one via ScrollSyncManager.
+            # Center-aligned, matching _on_scroll's center anchor: the row a
+            # sync moves TO should land at the same center point it was read
+            # from, not the top edge.
+            self.table_view.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.scroll_position = row_index
             self._update_scroll_indicator(row_index)
         finally:
-            scrollbar.blockSignals(False)
+            self._suppress_scroll_signal = False
+
+    def set_flag_anchors(self, anchors: list) -> None:
+        """Section 4.2 — apply the shared ±30s flag anchors to this window's
+        model so every correlated event renders flagged consistently.
+        """
+        self.table_model.set_flag_anchors(anchors)
+
+    def set_theme(self, theme: dict) -> None:
+        """Updates the header action buttons (Restore/Pop out) and timezone
+        badge — these use the general theme accent, not this panel's own
+        per-source color_hex (see set_color for that).
+        """
+        self._theme_accent = theme["accent"]
+        self._theme_badge_bg = theme["bg_input"]
+        self._theme_badge_text = theme["text_primary"]
+
+        self.timezone_badge.setStyleSheet(
+            f"background-color: {self._theme_badge_bg}; color: {self._theme_badge_text}; font-size: 11px; "
+            "padding: 1px 5px; border-radius: 10px;"
+        )
+        self.restore_button.setStyleSheet(
+            "QPushButton#RestoreSizeButton { "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#RestoreSizeButton:hover { "
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
+        )
+        self.detach_button.setStyleSheet(
+            "QPushButton#DetachButton { "
+            f"background-color: transparent; color: {self._theme_accent}; border: 1px solid {self._theme_accent}; "
+            "font-size: 11px; border-radius: 3px; padding: 0 8px; } "
+            "QPushButton#DetachButton:hover { "
+            f"background-color: {self._theme_accent}; color: #0a0e1a; }}"
+        )
+        self.table_model.set_theme(theme)
+
+    def set_color(self, color_hex: str) -> None:
+        """Retroactively recolors this already-open panel's header accent,
+        dot, and scroll-position label — used when the source-color palette
+        changes on a theme switch (color_map.set_palette already recomputed
+        the new hex; this just repaints the 3 inline styles that reference it,
+        since none of them are QSS-driven so a stylesheet re-apply wouldn't
+        reach them).
+        """
+        self.color_hex = color_hex
+        self._header_frame.setStyleSheet(f"QFrame#LogPanelHeader {{ border-top: 2px solid {color_hex}; }}")
+        self._dot_label.setStyleSheet(f"background-color: {color_hex}; border-radius: 4px;")
+        self.scroll_timestamp_label.setStyleSheet(f"font-size: 11px; color: {color_hex};")
+
+    def scroll_to_time(self, utc_dt) -> None:
+        """Scroll so the first row at/after utc_dt is at the top (Sections 3 &
+        4.1 — jump to range start / a file's first entry). Uses the sync path
+        so it does not re-emit a scroll and cause feedback.
+        """
+        entries = self.table_model.get_entries()
+        if not entries:
+            return
+        target = 0
+        found = False
+        for i, e in enumerate(entries):
+            nts = e.normalized_timestamp
+            if nts is not None and nts.utc_datetime >= utc_dt:
+                target = i
+                found = True
+                break
+        if not found:
+            target = len(entries) - 1
+        self.receive_sync_scroll(target)
+
+    def select_and_scroll_to_time(self, utc_dt) -> RawLogEntry | None:
+        """Programmatic navigation entry point for chart-click interactions —
+        scrolls to (and selects/highlights) the entry CLOSEST to utc_dt, then
+        emits row_selected the same way a manual row click would, so the
+        Event Detail panel updates to match. Distinct from scroll_to_time()
+        above, which finds the first entry AT/AFTER a timestamp rather than
+        the nearest one — that distinction matters less for a chart click,
+        where "closest" is the more intuitive landing point.
+        """
+        entries = self.table_model.get_entries()
+        if not entries:
+            return None
+        best_index = 0
+        best_delta = None
+        for i, e in enumerate(entries):
+            nts = e.normalized_timestamp
+            if nts is None:
+                continue
+            delta = abs((nts.utc_datetime - utc_dt).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_index = i
+        self.receive_sync_scroll(best_index)
+        entry = self.table_model.entry_at(best_index)
+        if entry is not None:
+            self.table_model.set_selected_row(best_index)
+            self.row_selected.emit(entry)
+        return entry
+
+    def first_entry_time(self):
+        """UTC datetime of this file's earliest event, or None."""
+        for e in self.table_model.get_entries():
+            if e.normalized_timestamp is not None:
+                return e.normalized_timestamp.utc_datetime
+        return None
 
     def set_timezone_label(self, tz_label: str) -> None:
         self.timezone_badge.setText(tz_label)
@@ -330,7 +494,7 @@ class LogWindowWidget(QWidget):
         self.table_model.set_display_timezone(iana_tz)
         self._update_scroll_indicator(self.scroll_position)
 
-    # -- Internal handlers ---------------------------------------------------------
+    # Internal handlers
 
     def _on_row_clicked(self, index) -> None:
         entry = self.table_model.entry_at(index.row())
@@ -338,26 +502,84 @@ class LogWindowWidget(QWidget):
             self.table_model.set_selected_row(index.row())
             self.row_selected.emit(entry)
 
-    def _on_scroll(self, value: int) -> None:
-        """Fires on every vertical scrollbar movement (mouse wheel, drag,
-        or programmatic). `value` here is the scrollbar's own internal
-        unit (roughly "pixels scrolled", not a row index), so it has to be
-        converted via rowAt() before it means anything to LogTableModel or
-        ScrollSyncManager.
+    def _on_context_menu(self, pos) -> None:
+        """Right-click menu for the row under the cursor. Shows TWO actions:
+        Copy timestamp and Flag (Section 4.2). Right-clicking selects the row
+        first so both actions operate on the row that was actually clicked.
         """
-        top_row = self.table_view.rowAt(0)
-        if top_row == -1:
-            # rowAt(0) returns -1 if no row currently occupies the very top
-            # pixel of the viewport (e.g. the table is empty, or — on some
-            # platforms — briefly during a resize/layout pass). Falling
-            # back to the last known good scroll_position avoids feeding a
-            # bogus -1 row index into ScrollSyncManager or the indicator
-            # below.
-            top_row = self.scroll_position
+        index = self.table_view.indexAt(pos)
+        if not index.isValid():
+            return
+        self.table_view.selectRow(index.row())
+        entry = self.table_model.entry_at(index.row())
+        if entry is None:
+            return
 
-        self.scroll_position = top_row
-        self._update_scroll_indicator(top_row)
-        self.scrolled.emit(self.source_label, top_row)
+        menu = QMenu(self)
+        copy_action = QAction("Copy timestamp", self)
+        menu.addAction(copy_action)
+
+        already = self.table_model._is_flagged_row(index.row())
+        flag_label = "⚑ Remove flag (±30s)" if already else "⚑ Flag event (+ correlate ±30s)"
+        flag_action = QAction(flag_label, self)
+        menu.addAction(flag_action)
+
+        chosen = menu.exec(self.table_view.viewport().mapToGlobal(pos))
+        if chosen is copy_action:
+            self._copy_timestamp(entry)
+        elif chosen is flag_action:
+            self.flag_toggle_requested.emit(entry)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Catches Ctrl+C (the platform copy shortcut) while the table view has
+        focus and copies the selected row's timestamp. Every other event is
+        passed through so normal table navigation still works.
+        """
+        if obj is self.table_view and event.type() == QEvent.KeyPress:
+            if event.matches(QKeySequence.Copy):
+                self._copy_current_row_timestamp()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _copy_current_row_timestamp(self) -> None:
+        """Ctrl+C path — copy the currently selected/current row's timestamp."""
+        selected = self.table_view.selectionModel().selectedRows()
+        row = selected[0].row() if selected else self.table_view.currentIndex().row()
+        entry = self.table_model.entry_at(row) if row >= 0 else None
+        if entry is not None:
+            self._copy_timestamp(entry)
+
+    def _copy_timestamp(self, entry: RawLogEntry) -> None:
+        """Copies the row's CONVERTED timestamp as a full, paste-ready
+        "YYYY-MM-DD HH:MM:SS.mmm" (display timezone) to the clipboard, so it
+        drops straight into the time-range Start/End boxes. Read-only — never
+        touches highlight/flag state.
+        """
+        QApplication.clipboard().setText(self.table_model.full_display_datetime(entry))
+
+    def _on_scroll(self, value: int) -> None:
+        """Fires on every vertical scrollbar movement (mouse wheel, drag, or
+        programmatic). The sync anchor is the row visible at the CENTER of the
+        viewport, not the topmost row — different sources pack very different
+        row counts into the same time span, so anchoring on what's centered on
+        screen keeps what the investigator is actually looking at aligned
+        across panels.
+        """
+        if self._suppress_scroll_signal:
+            # A code-driven scroll (receive_sync_scroll) already updates
+            # scroll_position/the indicator itself and must not re-emit.
+            return
+
+        center_point = self.table_view.viewport().rect().center()
+        center_row = self.table_view.indexAt(center_point).row()
+        if center_row == -1:
+            center_row = self.table_view.rowAt(0)
+        if center_row == -1:
+            center_row = self.scroll_position
+
+        self.scroll_position = center_row
+        self._update_scroll_indicator(center_row)
+        self.scrolled.emit(self.source_label, center_row)
 
     def _update_scroll_indicator(self, row: int) -> None:
         """Keeps the bottom "Scroll position" slider and timestamp label in

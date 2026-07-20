@@ -1,4 +1,6 @@
 """
+Owned by: Fatima
+
 InvestigationDashboard — right panel summarising loaded logs, activity, and
 correlations (Section 5.2, Presentation Layer / Section 6.3.4 Zone 5).
 
@@ -12,26 +14,16 @@ Four subsections (Section 6.3.4 Zone 5):
     3. Session Statistics (2x2 metric card grid)
     4. Correlated Events List (scrollable)
 
-Owned by: Fatima
+
 """
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea, QGridLayout
 )
-
-# TODO (Fatima — Section 5.5 Additional Software Components):
-#   The activity frequency chart should be implemented using PyQtGraph's
-#   BarGraphItem / PlotWidget per the design doc, not a placeholder QLabel.
-#   from pyqtgraph import PlotWidget, BarGraphItem
-
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea, QGridLayout
-)
-
 from src.models.data_classes import RawLogEntry
 from src.visualiser.activity_frequency_chart import ActivityFrequencyChart
+from src.visualiser.activity_heatmap import ActivityHeatmap
 from src.visualiser.timeline_widget import TimelineWidget
 
 
@@ -112,19 +104,19 @@ class InvestigationDashboard(QWidget):
         # as its LogTab dot and LogWindowWidget header dot.
         self._colors: dict[str, str] = {}
 
-        self._display_tz = "Asia/Dubai"
+        self._display_tz = "Australia/Perth"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(14)
-
         layout.addWidget(self._build_activity_chart_section())
+        layout.addWidget(self._build_heatmap_section())
         layout.addWidget(self._build_timeline_section())
         layout.addWidget(self._build_stats_section())
         layout.addWidget(self._build_correlated_events_section())
         layout.addStretch()
 
-    # -- Subsection builders ---------------------------------------------------
+    # Subsection builders
 
     def _build_activity_chart_section(self) -> QWidget:
         container = QWidget()
@@ -137,6 +129,19 @@ class InvestigationDashboard(QWidget):
 
         self.activity_chart = ActivityFrequencyChart()
         v.addWidget(self.activity_chart)
+        return container
+
+    def _build_heatmap_section(self) -> QWidget:
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        title = QLabel("ACTIVITY HEATMAP")
+        title.setProperty("class", "SectionTitle")
+        v.addWidget(title)
+
+        self.activity_heatmap = ActivityHeatmap()
+        v.addWidget(self.activity_heatmap)
         return container
 
     def _build_timeline_section(self) -> QWidget:
@@ -196,7 +201,7 @@ class InvestigationDashboard(QWidget):
         v.addLayout(self.correlated_list_container)
         return container
 
-    # -- Public API ----------------------------------------------------------------
+    # Public API
 
     def load_entries(self, source_label: str, entries: list[RawLogEntry], color_hex: str) -> None:
         """Registers (or replaces) one source's full entry list and color.
@@ -212,6 +217,7 @@ class InvestigationDashboard(QWidget):
         self._entries_by_source[source_label] = entries
         self._colors[source_label] = color_hex
         self.activity_chart.set_entries(self._entries_by_source, self._colors)
+        self.activity_heatmap.set_entries(self._entries_by_source, self._colors)
         self.timeline_widget.set_entries(self._entries_by_source, self._colors)
 
     def remove_source(self, source_label: str) -> None:
@@ -224,9 +230,11 @@ class InvestigationDashboard(QWidget):
 
         if not self._entries_by_source:
             self.activity_chart.clear_chart()
+            self.activity_heatmap.clear_chart()
             self.timeline_widget.clear_timeline()
         else:
             self.activity_chart.set_entries(self._entries_by_source, self._colors)
+            self.activity_heatmap.set_entries(self._entries_by_source, self._colors)
             self.timeline_widget.set_entries(self._entries_by_source, self._colors)
 
     def set_display_timezone(self, tz_name: str) -> None:
@@ -240,6 +248,7 @@ class InvestigationDashboard(QWidget):
         """
         self._display_tz = tz_name
         self.timeline_widget.set_display_timezone(tz_name)
+        self.activity_heatmap.set_display_timezone(tz_name)
 
     def refresh(self, summary: dict, active_sources: list[str], inactive_sources: list[str]) -> None:
         """Section 4.7.2 step 7 — InvestigationDashboard.refresh().
@@ -254,15 +263,6 @@ class InvestigationDashboard(QWidget):
         Section 4.7.2 step 7 call signature MainWindow._on_filter_applied
         already invokes.
 
-        TODO (Pooja/Fatima — TimeFrameSelector):
-            This currently has no access to the active FilterConfig's
-            start_time/end_time directly — MainWindow holds that, not
-            InvestigationDashboard. Until FilterConfig (or just its two
-            datetimes) is passed through here, call
-            set_investigation_window() directly from
-            MainWindow._on_filter_applied / _on_filter_cleared instead of
-            relying on refresh() to do it. See the two new calls added in
-            MainWindow for the current wiring.
         """
         pass
 
@@ -270,7 +270,6 @@ class InvestigationDashboard(QWidget):
         """Updates which bars render dimmed vs full-opacity on the activity
         chart. start/end should be the same UTC-aware datetimes (or both
         None, to clear) that LogFilter.apply_filter() received — see the
-        TODO on refresh() for why MainWindow calls this directly rather
         than through refresh()'s summary dict.
         """
         self.activity_chart.set_investigation_window(start, end)

@@ -1,22 +1,20 @@
 """
+Owned by: Pooja
+
 log_filter.py — implements ALGORITHM: ApplyFilter from Section 4.7.2 of the
 design document (R4, R5, R6).
 
-Owned by: Pooja
 Consumed by: src/ui/main_window.py (_on_filter_applied wires to this)
 """
 
 from datetime import timedelta
-
 from src.models.data_classes import FilterConfig, RawLogEntry
-
 
 class FilterValidationError(Exception):
     """Raised when a FilterConfig fails validation. Carries a message
     suitable for direct display to the investigator (Section 4.7.2 step 1).
     """
     pass
-
 
 class LogFilter:
     """Applies an investigator-defined timeframe to all loaded entries and
