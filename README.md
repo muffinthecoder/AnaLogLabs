@@ -8,9 +8,9 @@
 
 ## Overview
 
-AnaLog Labs is a desktop application that enables IT Security Operations Officers to import, synchronize, correlate, and visualize security log data from multiple sources within a single unified interface.
+AnaLog Labs is an offline desktop application that enables IT Security Operations Officers to import, normalise, filter, and visualise security log data from multiple sources within a single unified interface.
 
-The tool was developed in response to the fragmented, manual process investigators currently face when analyzing security incidents across systems such as Microsoft Defender, VPN logs, and device event logs. AnaLog Labs replaces the need to open and manually align logs across separate tools by providing synchronized multi-log viewing, timestamp normalization, cross-log event correlation, and interactive timeline visualizations — all entirely offline.
+The tool was developed in response to the fragmented, manual process investigators currently face when analysing security incidents across systems such as Microsoft Defender, VPN logs, and device event logs. AnaLog Labs replaces the need to open and manually align logs across separate tools by providing multi-log viewing, timestamp normalisation, timeframe-based filtering, and interactive visualisations — all entirely offline. Correlation of events across logs is performed manually by the investigator, supported by a shared timeline, filtering, flagging, and the dashboard visualisations.
 
 ---
 
@@ -31,19 +31,23 @@ The tool was developed in response to the fragmented, manual process investigato
 
 ## Features
 
-- **Multi-file log import** — Import up to 7 CSV, XLSX, or TXT log files simultaneously
-- **Timestamp normalisation** — Align timestamps across Perth (AWST UTC+8), Singapore (SGT UTC+8), and Dubai (GST UTC+4) time zones
-- **Unified timeline** — View and compare events from all loaded logs in chronological order
-- **Custom investigation timeframe** — Define a start and end time down to millisecond precision
-- **Timeframe filtering and highlighting** — Filter and highlight events within the investigation window across all logs
-- **Tab-based log management** — Each log displayed in its own tab with visual activity indicators
-- **Independent movable log windows** — Drag and reposition each log panel freely
+- **Multi-file log import** — Import CSV, XLSX, or TXT log files and view up to 8 log windows simultaneously
+- **Timestamp normalisation** — Convert timestamps across nine supported time zones: UTC, Perth (AWST, UTC+8), Adelaide, Darwin, Brisbane, Sydney, Melbourne, Dubai (GST, UTC+4), and Singapore (SGT, UTC+8) — with correct daylight-saving handling for the zones that observe it (Sydney, Melbourne, Adelaide). Imported logs are assumed to be Perth local time by default unless the timestamp carries its own zone
+- **Display time-zone selection** — Choose the investigation display time zone at import, or change it mid-session with all timestamps re-rendering instantly
+- **Unified timeline** — View and compare events from all loaded logs against a common time reference
+- **Custom investigation timeframe** — Define a start and end time down to millisecond precision, with a small automatic offset so boundary events are not missed
+- **Timeframe filtering and highlighting** — Highlight events within the investigation window across all logs; non-matching events remain visible but de-emphasised
+- **Tab-based log management** — Each log listed in the sidebar with match / inactive / active visual states
+- **Independent, movable log windows** — Drag, resize, pop out, and dock each log panel freely, including across multiple monitors
 - **Side-by-side log view** — Compare activity across systems at the same point in time
-- **Synchronized scrolling** — Scroll one log and all others advance to the corresponding timestamp
-- **Timeline and correlation visualizations** — Charts, timelines, and linked event views
-- **Raw log data display** — Inspect full untruncated event details for any entry
+- **Synchronized scrolling** — Optionally scroll all log windows together to the corresponding timestamp
+- **Interactive visualisations** — Activity heatmap, spike chart, and entity bubble chart, with hover detail
+- **Raw log data display** — Inspect full, untruncated event details and the raw record for any entry
 - **Investigation dashboard** — High-level activity overview across all loaded logs
-- **Cross-log event correlation** — Identify related events across logs by shared timestamps or attributes
+- **Manual event flagging & session notes** — Flag events of interest and record investigation notes, with export
+- **Switchable visual themes** — Original, Dark, and Light themes
+
+> **Note:** Automatic cross-log correlation by shared attributes (originally R13) was descoped after Client Meeting 3 and is not implemented. Correlation is performed manually by the investigator using the timeframe, flagging, and visualisation features.
 
 ---
 
@@ -53,21 +57,16 @@ The tool was developed in response to the fragmented, manual process investigato
 |---|---|
 | Language | Python 3.10+ |
 | UI Framework | PySide6 |
-| Log Processing | Pandas / DuckDB |
-| Visualizations | PyQtGraph, Matplotlib, Seaborn |
-| Packaging | PyInstaller |
+| Log Processing | pandas, openpyxl |
+| Time-zone Handling | pytz, tzlocal |
+| Visualisations | PyQtGraph (with custom QPainter widgets) |
 | Version Control | Git / GitHub |
-
----
 
 **Supported file formats:** `.csv`, `.xlsx`, `.txt`
 
 ---
 
 ## Installation
-
-> AnaLog Labs is distributed as a standalone executable. No manual dependency installation is required.
-
 
 ### Run from source
 ```bash
@@ -87,29 +86,27 @@ pip install -r requirements.txt
 python main.py
 ```
 
+**Dependencies** (`requirements.txt`): PySide6, openpyxl, pytz, pandas, pyqtgraph, tzlocal
+
 ---
 
 ## Project Structure
 
 ```
 analog-labs/
-├── main.py                  # Application entry point
-├── requirements.txt         # Python dependencies
+├── main.py                      # Application entry point
+├── requirements.txt             # Python dependencies
 ├── README.md
-├── .gitignore
 ├── src/
-│   ├── parser/              # Log file import and parsing (R1)
-│   ├── normaliser/          # Timestamp normalisation (R2, R3)
-│   ├── filter/              # Date range filtering (R4, R5)
-│   ├── correlator/          # Cross-log correlation and sync (R9, R13)
-│   ├── visualiser/          # Charts, timelines, dashboard (R10, R12)
-│   └── ui/                  # PySide6 interface components (R6, R7, R8, R11)
-├── tests/                   # Unit and integration tests
-├── docs/                    # Project documentation
-│   ├── requirements_analysis.pdf
-│   └── project_management_plan.pdf
-├── sample_logs/             # Sample CSV log files for testing
-└── assets/                  # Icons and UI assets
+│   ├── parser/                  # Log file import and parsing — CSV, TXT, XLSX (R1)
+│   ├── normaliser/              # Timestamp normalisation and time-zone mapping (R2, R3)
+│   ├── filter/                  # Investigation timeframe filtering (R4, R5)
+│   ├── correlator/              # Unified timeline merge (R2) and synchronized scrolling (R9)
+│   ├── visualiser/              # Heatmap, spike chart, bubble chart, timeline (R10, R12)
+│   ├── models/                  # Data classes and table models
+│   └── ui/                      # PySide6 interface components (R6, R7, R8, R11, R12)
+├── sample_logs/                 # Sample log files for testing
+└── docs/                        # Project documentation
 ```
 
 ---
@@ -120,7 +117,4 @@ analog-labs/
 - **Read-only** — Log files are never modified, deleted, or copied by the application
 - **No SIEM replacement** — AnaLog Labs is a post-incident forensic tool only; it does not generate alerts or perform real-time monitoring
 - **Local data only** — All log data remains on the investigator's machine at all times
-
----
-
-
+- **No persistence** — All loaded data is held in memory and discarded when the application closes
